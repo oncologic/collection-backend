@@ -144,6 +144,28 @@ This command uses `src/db/migrate.js` and the migrations in
 `migrations/` and `src/migrations/`; apply those according to your deployment
 process if your environment depends on them.
 
+Seed local data after migrations:
+
+```bash
+npm run seed
+```
+
+The seed script is idempotent and creates the baseline tenants, local users,
+tenant memberships, roles, subscription plans, metadata lookup rows, tags, and
+small sample collections/resources/links needed for a fresh database to be
+usable. By default it uses these tenant IDs unless you override them:
+
+```env
+KIDNEY_TENANT_ID=00000000-0000-4000-8000-000000000001
+COMMUNITY_TENANT=00000000-0000-4000-8000-000000000002
+```
+
+If you want the seeded admin to match a real Clerk user, set
+`SEED_ADMIN_CLERK_USER_ID` before running the seed command.
+
+To validate seed configuration without writing to the database, run
+`npm run seed -- --dry-run`.
+
 ## Common Commands
 
 ```bash
@@ -155,6 +177,7 @@ npm run test:integration
 npm run format              # Format source files
 npm run embeddings          # Manage embedding tasks
 npm run process-embeddings  # Process queued embedding work
+npm run seed                # Seed local tenants and baseline data
 ```
 
 ## API Areas
