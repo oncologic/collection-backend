@@ -10,6 +10,7 @@ import {
   gt,
   inArray,
   ne,
+  asc,
 } from 'drizzle-orm';
 import { sql } from 'drizzle-orm';
 import { organizationEvents } from '../models/organizations.js';
@@ -40,6 +41,7 @@ import { pinnedItems } from '../models/pinnedItems.js';
 import { collectionCollaborators } from '../models/collectionCollaborators.js';
 import { users } from '../models/users.js';
 import { collectionExternalLinkCollaborators } from '../models/collectionExternalLinkCollaborators.js';
+import { collectionExternalLinkResources } from '../models/collectionExternalLinkResources.js';
 import { getTagsForCollectionExternalLinkService } from './collectionExternalLinkTagsService.js';
 import {
   autoUpdateCollectionEmbedding,
@@ -66,6 +68,11 @@ import {
 
 const PUBLIC_SHAREABLE_VISIBILITIES = ['public', 'unlisted'];
 const DIRECT_SHAREABLE_COLLECTION_TYPES = ['resource', 'external'];
+const EXTERNAL_WORKFLOW_COLLECTION_TYPES = [
+  'external',
+  'workflow_template',
+  'workflow_instance',
+];
 
 const isPubliclyShareableVisibility = (visibility) =>
   PUBLIC_SHAREABLE_VISIBILITIES.includes(visibility);
@@ -73,6 +80,109 @@ const isPubliclyShareableVisibility = (visibility) =>
 const canEnableDirectCollectionSharing = (type, visibility) =>
   DIRECT_SHAREABLE_COLLECTION_TYPES.includes(type) &&
   isPubliclyShareableVisibility(visibility);
+
+const normalizeWorkflowMetadata = (value) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {};
+  }
+  return value;
+};
+
+const toDateString = (value) => {
+  if (!value) return null;
+  if (value instanceof Date) {
+    return value.toISOString().slice(0, 10);
+  }
+  return String(value).slice(0, 10);
+};
+
+const addDaysToDateString = (dateString, days) => {
+  if (!dateString) return null;
+  const date = new Date(`${dateString}T00:00:00.000Z`);
+  if (Number.isNaN(date.getTime())) return null;
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+};
+
+const daysBetweenInclusive = (startDate, endDate) => {
+  const start = toDateString(startDate);
+  const end = toDateString(endDate);
+  if (!start || !end) return null;
+
+  const startMs = new Date(`${start}T00:00:00.000Z`).getTime();
+  const endMs = new Date(`${end}T00:00:00.000Z`).getTime();
+  if (Number.isNaN(startMs) || Number.isNaN(endMs) || endMs < startMs) {
+    return null;
+  }
+
+  return Math.floor((endMs - startMs) / 86400000) + 1;
+};
+
+const asOptionalInteger = (value) => {
+  if (value === null || value === undefined || value === '') return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.trunc(number) : null;
+};
+
+const getStepDurationDays = (step) => {
+  const metadata = normalizeWorkflowMetadata(step.workflowMetadata);
+  return (
+    asOptionalInteger(metadata.estimatedDurationDays) ||
+    asOptionalInteger(metadata.durationDays) ||
+    daysBetweenInclusive(step.startDate || step.date, step.endDate) ||
+    1
+  );
+};
+
+const calculateWorkflowStepDates = (
+  step,
+  projectStartDate,
+  previousEndDate,
+  stepIndex
+) => {
+  const normalizedProjectStart = toDateString(projectStartDate);
+  const metadata = normalizeWorkflowMetadata(step.workflowMetadata);
+
+  if (!normalizedProjectStart) {
+    const copiedStartDate = toDateString(step.startDate || step.date);
+    const copiedEndDate = toDateString(step.endDate) || copiedStartDate;
+    return {
+      startDate: copiedStartDate,
+      endDate: copiedEndDate,
+      date: copiedStartDate,
+    };
+  }
+
+  const relativeStartDay =
+    asOptionalInteger(metadata.relativeStartDay) ??
+    asOptionalInteger(metadata.offsetDays);
+  const durationDays = Math.max(getStepDurationDays(step), 1);
+
+  const startDate =
+    relativeStartDay !== null
+      ? addDaysToDateString(normalizedProjectStart, relativeStartDay)
+      : stepIndex === 0 || !previousEndDate
+        ? normalizedProjectStart
+        : addDaysToDateString(previousEndDate, 1);
+  const endDate = addDaysToDateString(startDate, durationDays - 1);
+
+  return {
+    startDate,
+    endDate: endDate || startDate,
+    date: startDate,
+  };
+};
+
+const statusToPercentComplete = (status) => {
+  const normalizedStatus = (status || '').toLowerCase();
+  if (normalizedStatus === 'completed') return 100;
+  if (normalizedStatus === 'active') return 50;
+  if (normalizedStatus === 'archived') return 100;
+  return 0;
+};
+
+const normalizeWorkflowStatus = (status) =>
+  (status || 'pending').toLowerCase();
 
 function isYoutubeUrl(url) {
   return url && (url.includes('youtube.com') || url.includes('youtu.be'));
@@ -240,10 +350,12 @@ const getCollectionsWithRelations = async (db, userId = null, tenants) => {
       type: collections.type,
       startDate: collections.startDate,
       endDate: collections.endDate,
+      sourceTemplateId: collections.sourceTemplateId,
       eventId: collections.eventId,
       tenantId: collections.tenantId,
       hashtags: collections.hashtags,
       publicJsonEnabled: collections.publicJsonEnabled,
+      workflowMetadata: collections.workflowMetadata,
       // Exclude embedding fields: nameEmbedding, descriptionEmbedding, hashtagsEmbedding, combinedEmbedding, vectorUpdatedAt
       resource_count:
         sql`COUNT(DISTINCT ${collectionResources.resourceId})`.mapWith(Number),
@@ -344,6 +456,7 @@ export async function updateCollectionService(
       type: collections.type,
       visibility: collections.visibility,
       publicJsonEnabled: collections.publicJsonEnabled,
+      workflowMetadata: collections.workflowMetadata,
     })
     .from(collections)
     .where(whereCondition)
@@ -382,6 +495,14 @@ export async function updateCollectionService(
 
   if (Object.prototype.hasOwnProperty.call(data, 'whiteboardData')) {
     mappedData.whiteboardData = data.whiteboardData;
+  }
+  if (Object.prototype.hasOwnProperty.call(data, 'workflowMetadata')) {
+    mappedData.workflowMetadata = normalizeWorkflowMetadata(
+      data.workflowMetadata
+    );
+  }
+  if (Object.prototype.hasOwnProperty.call(data, 'sourceTemplateId')) {
+    mappedData.sourceTemplateId = data.sourceTemplateId || null;
   }
 
   const collection = await db
@@ -477,11 +598,15 @@ export async function getCollectionByIdService(id, userId = null, tenants) {
       updatedAt: collections.updatedAt,
       color: collections.color,
       type: collections.type,
+      startDate: collections.startDate,
+      endDate: collections.endDate,
+      sourceTemplateId: collections.sourceTemplateId,
       eventId: collections.eventId,
       tenantId: collections.tenantId,
       hashtags: collections.hashtags,
       publicJsonEnabled: collections.publicJsonEnabled,
       whiteboardData: collections.whiteboardData,
+      workflowMetadata: collections.workflowMetadata,
       isPinned: sql`EXISTS (
         SELECT 1 FROM pinned_items 
         WHERE user_id = ${userIdValue}::uuid 
@@ -737,9 +862,13 @@ export async function createCollectionService(collectionData, userId) {
       organizationId: null,
       hashtags: collectionData.hashtags || null,
       eventId: collectionData.eventId || null,
+      sourceTemplateId: collectionData.sourceTemplateId || null,
       icon: collectionData.icon || null,
       tenantId: collectionData.tenantId,
       whiteboardData: collectionData.whiteboardData || null,
+      workflowMetadata: normalizeWorkflowMetadata(
+        collectionData.workflowMetadata
+      ),
       ...dateRangeFields,
       // Resource collections keep the existing auto-share behavior,
       // while private collections are always forced off.
@@ -796,6 +925,397 @@ export async function createCollectionService(collectionData, userId) {
   }
 }
 
+export async function createWorkflowInstanceFromTemplateService(
+  templateCollectionId,
+  options = {},
+  userId,
+  tenantIds = []
+) {
+  const template = await getCollectionByIdService(
+    templateCollectionId,
+    userId,
+    tenantIds
+  );
+
+  if (!template) {
+    const error = new Error('Template collection not found');
+    error.statusCode = 404;
+    throw error;
+  }
+
+  if (!EXTERNAL_WORKFLOW_COLLECTION_TYPES.includes(template.type)) {
+    const error = new Error(
+      'Workflow instances can only be created from external-link collections'
+    );
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const tenantId = options.tenantId || template.tenantId || tenantIds[0];
+  if (tenantId && tenantIds.length > 0 && !tenantIds.includes(tenantId)) {
+    const error = new Error('Invalid tenant ID');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const projectStartDate = toDateString(options.startDate) || toDateString(new Date());
+  const includeResources = options.includeResources !== false;
+
+  return db.transaction(async (tx) => {
+    const templateSteps = await tx
+      .select({
+        associationId: collectionExternalLinks.id,
+        externalLinkId: collectionExternalLinks.externalLinkId,
+        date: collectionExternalLinks.date,
+        startDate: collectionExternalLinks.startDate,
+        endDate: collectionExternalLinks.endDate,
+        status: collectionExternalLinks.status,
+        eventId: collectionExternalLinks.eventId,
+        organizationId: collectionExternalLinks.organizationId,
+        notes: collectionExternalLinks.notes,
+        sortOrder: collectionExternalLinks.sortOrder,
+        workflowMetadata: collectionExternalLinks.workflowMetadata,
+        linkName: externalLinks.name,
+        linkUrl: externalLinks.url,
+      })
+      .from(collectionExternalLinks)
+      .innerJoin(
+        externalLinks,
+        eq(collectionExternalLinks.externalLinkId, externalLinks.id)
+      )
+      .where(eq(collectionExternalLinks.collectionId, templateCollectionId))
+      .orderBy(
+        asc(collectionExternalLinks.sortOrder),
+        asc(collectionExternalLinks.createdAt)
+      );
+
+    const selectedStepIds = Array.isArray(options.selectedStepIds)
+      ? new Set(options.selectedStepIds.map(String))
+      : null;
+    const stepsToClone = selectedStepIds
+      ? templateSteps.filter(
+          (step) =>
+            selectedStepIds.has(String(step.associationId)) ||
+            selectedStepIds.has(String(step.externalLinkId))
+        )
+      : templateSteps;
+
+    if (stepsToClone.length === 0) {
+      const error = new Error('Template has no workflow steps to instantiate');
+      error.statusCode = 400;
+      throw error;
+    }
+
+    const templateWorkflowMetadata = normalizeWorkflowMetadata(
+      template.workflowMetadata
+    );
+    const instanceWorkflowMetadata = {
+      ...templateWorkflowMetadata,
+      ...normalizeWorkflowMetadata(options.workflowMetadata),
+      kind: 'instance',
+      sourceTemplateId: templateCollectionId,
+      sourceTemplateName: template.name,
+      instantiatedAt: new Date().toISOString(),
+      projectStartDate,
+      planningViews: ['list', 'calendar', 'timeline'],
+    };
+
+    const [createdCollection] = await tx
+      .insert(collections)
+      .values({
+        name: options.name || `${template.name || 'Workflow'} Project`,
+        description:
+          options.description !== undefined
+            ? options.description
+            : template.description,
+        visibility: options.visibility || 'private',
+        color: template.color,
+        type: 'external',
+        userId,
+        organizationId: null,
+        status: options.status || 'active',
+        icon: template.icon,
+        tenantId,
+        sourceTemplateId: templateCollectionId,
+        workflowMetadata: instanceWorkflowMetadata,
+        startDate: projectStartDate,
+        endDate: projectStartDate,
+        publicJsonEnabled: false,
+        whiteboardData: template.whiteboardData || null,
+        hashtags: Array.isArray(template.hashtags)
+          ? template.hashtags.join(',') || null
+          : template.hashtags || null,
+      })
+      .returning();
+
+    const templateResources = includeResources
+      ? await tx
+          .select()
+          .from(collectionExternalLinkResources)
+          .where(
+            eq(
+              collectionExternalLinkResources.collectionId,
+              templateCollectionId
+            )
+          )
+      : [];
+
+    const resourcesByExternalLinkId = templateResources.reduce((map, row) => {
+      const rows = map.get(row.externalLinkId) || [];
+      rows.push(row);
+      map.set(row.externalLinkId, rows);
+      return map;
+    }, new Map());
+
+    const stepIdMap = new Map();
+    const clonedSteps = [];
+    let previousEndDate = null;
+    let projectEndDate = projectStartDate;
+
+    for (const [index, step] of stepsToClone.entries()) {
+      const stepMetadata = normalizeWorkflowMetadata(step.workflowMetadata);
+      const calculatedDates = calculateWorkflowStepDates(
+        step,
+        projectStartDate,
+        previousEndDate,
+        index
+      );
+
+      const [createdStep] = await tx
+        .insert(collectionExternalLinks)
+        .values({
+          collectionId: createdCollection.id,
+          externalLinkId: step.externalLinkId,
+          userId,
+          date: calculatedDates.date,
+          startDate: calculatedDates.startDate,
+          endDate: calculatedDates.endDate,
+          status:
+            options.initialStepStatus ||
+            stepMetadata.initialStatus ||
+            'pending',
+          eventId: step.eventId,
+          organizationId: step.organizationId,
+          notes: step.notes,
+          sortOrder: step.sortOrder ?? index,
+          workflowMetadata: {
+            ...stepMetadata,
+            sourceTemplateStepId: step.associationId,
+            estimatedDurationDays: getStepDurationDays(step),
+          },
+        })
+        .returning();
+
+      stepIdMap.set(String(step.associationId), createdStep.id);
+
+      const resourcesToClone =
+        resourcesByExternalLinkId.get(step.externalLinkId) || [];
+      if (resourcesToClone.length > 0) {
+        await tx.insert(collectionExternalLinkResources).values(
+          resourcesToClone.map((resource) => ({
+            collectionId: createdCollection.id,
+            externalLinkId: step.externalLinkId,
+            resourceId: resource.resourceId,
+            notes: resource.notes,
+            orderPosition: resource.orderPosition,
+            userAddedById: resource.userAddedById || userId,
+            organizationAddedById: resource.organizationAddedById,
+          }))
+        );
+      }
+
+      previousEndDate = calculatedDates.endDate;
+      if (calculatedDates.endDate && calculatedDates.endDate > projectEndDate) {
+        projectEndDate = calculatedDates.endDate;
+      }
+
+      clonedSteps.push({
+        ...createdStep,
+        name: step.linkName,
+        url: step.linkUrl,
+        resourcesCount: resourcesToClone.length,
+      });
+    }
+
+    for (const step of clonedSteps) {
+      const metadata = normalizeWorkflowMetadata(step.workflowMetadata);
+      if (!Array.isArray(metadata.dependsOnStepIds)) continue;
+
+      const mappedDependencies = metadata.dependsOnStepIds.map((dependencyId) =>
+        stepIdMap.get(String(dependencyId)) || dependencyId
+      );
+
+      await tx
+        .update(collectionExternalLinks)
+        .set({
+          workflowMetadata: {
+            ...metadata,
+            dependsOnStepIds: mappedDependencies,
+          },
+          updatedAt: new Date(),
+        })
+        .where(eq(collectionExternalLinks.id, step.id));
+
+      step.workflowMetadata = {
+        ...metadata,
+        dependsOnStepIds: mappedDependencies,
+      };
+    }
+
+    const [updatedCollection] = await tx
+      .update(collections)
+      .set({
+        endDate: projectEndDate,
+        updatedAt: new Date(),
+      })
+      .where(eq(collections.id, createdCollection.id))
+      .returning();
+
+    return {
+      collection: updatedCollection,
+      sourceTemplate: template,
+      steps: clonedSteps,
+    };
+  });
+}
+
+export async function getWorkflowTimelineForCollectionService(
+  collectionId,
+  userId,
+  tenantIds = []
+) {
+  const collection = await getCollectionByIdService(
+    collectionId,
+    userId,
+    tenantIds
+  );
+
+  if (!collection) {
+    const error = new Error('Collection not found');
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const stepRows = await db
+    .select({
+      id: collectionExternalLinks.id,
+      externalLinkId: collectionExternalLinks.externalLinkId,
+      title: externalLinks.name,
+      url: externalLinks.url,
+      description: externalLinks.description,
+      notes: collectionExternalLinks.notes,
+      date: collectionExternalLinks.date,
+      startDate: collectionExternalLinks.startDate,
+      endDate: collectionExternalLinks.endDate,
+      status: collectionExternalLinks.status,
+      sortOrder: collectionExternalLinks.sortOrder,
+      workflowMetadata: collectionExternalLinks.workflowMetadata,
+      createdAt: collectionExternalLinks.createdAt,
+      updatedAt: collectionExternalLinks.updatedAt,
+    })
+    .from(collectionExternalLinks)
+    .innerJoin(
+      externalLinks,
+      eq(collectionExternalLinks.externalLinkId, externalLinks.id)
+    )
+    .where(eq(collectionExternalLinks.collectionId, collectionId))
+    .orderBy(
+      asc(collectionExternalLinks.sortOrder),
+      asc(collectionExternalLinks.createdAt)
+    );
+
+  const resourceCountRows = await db
+    .select({
+      externalLinkId: collectionExternalLinkResources.externalLinkId,
+      count: sql`COUNT(*)`.mapWith(Number),
+    })
+    .from(collectionExternalLinkResources)
+    .where(eq(collectionExternalLinkResources.collectionId, collectionId))
+    .groupBy(collectionExternalLinkResources.externalLinkId);
+
+  const resourceCounts = new Map(
+    resourceCountRows.map((row) => [row.externalLinkId, row.count])
+  );
+
+  const items = stepRows.map((step) => {
+    const metadata = normalizeWorkflowMetadata(step.workflowMetadata);
+    const startDate = toDateString(step.startDate || step.date);
+    const endDate = toDateString(step.endDate) || startDate;
+    const status = normalizeWorkflowStatus(step.status);
+
+    return {
+      id: step.id,
+      externalLinkId: step.externalLinkId,
+      title: step.title || step.url || 'Untitled Step',
+      url: step.url,
+      description: step.description,
+      notes: step.notes,
+      startDate,
+      endDate,
+      status,
+      sortOrder: step.sortOrder,
+      ownerRole: metadata.ownerRole || null,
+      ownerName: metadata.ownerName || null,
+      ownerEmail: metadata.ownerEmail || null,
+      completionCriteria: metadata.completionCriteria || null,
+      dependencies: Array.isArray(metadata.dependsOnStepIds)
+        ? metadata.dependsOnStepIds
+        : [],
+      estimatedDurationDays: getStepDurationDays(step),
+      resourcesCount: resourceCounts.get(step.externalLinkId) || 0,
+      percentComplete: statusToPercentComplete(status),
+      workflowMetadata: metadata,
+      createdAt: step.createdAt,
+      updatedAt: step.updatedAt,
+    };
+  });
+
+  const statusCounts = items.reduce(
+    (counts, item) => {
+      counts.total += 1;
+      counts[item.status] = (counts[item.status] || 0) + 1;
+      return counts;
+    },
+    { total: 0 }
+  );
+
+  const today = toDateString(new Date());
+  const incompleteItems = items.filter(
+    (item) => !['completed', 'archived'].includes(item.status)
+  );
+  const nextStep =
+    incompleteItems.find((item) => item.startDate && item.startDate >= today) ||
+    incompleteItems[0] ||
+    null;
+
+  const timelineStartDate =
+    items.map((item) => item.startDate).filter(Boolean).sort()[0] ||
+    toDateString(collection.startDate);
+  const timelineEndDate =
+    items
+      .map((item) => item.endDate || item.startDate)
+      .filter(Boolean)
+      .sort()
+      .at(-1) || toDateString(collection.endDate);
+
+  return {
+    collection,
+    items,
+    summary: {
+      ...statusCounts,
+      completed: statusCounts.completed || 0,
+      active: statusCounts.active || 0,
+      pending: statusCounts.pending || 0,
+      waiting: statusCounts.waiting || 0,
+      blocked: statusCounts.blocked || 0,
+      archived: statusCounts.archived || 0,
+      startDate: timelineStartDate,
+      endDate: timelineEndDate,
+      nextStep,
+    },
+  };
+}
+
 export async function getExternalLinksForAllCollectionsService(
   userId,
   tenants
@@ -815,11 +1335,13 @@ export async function getExternalLinksForAllCollectionsService(
           c.updated_at,
           c.start_date,
           c.end_date,
+          c.source_template_id,
           c.event_id,
           c.status,
           c.tenant_id,
           c.hashtags,
           c.user_id,
+          c.workflow_metadata,
           EXISTS (
             SELECT 1 FROM pinned_items 
             WHERE user_id = ${userId} 
@@ -857,6 +1379,7 @@ export async function getExternalLinksForAllCollectionsService(
                 'date_added', el.date_added,
                 'status', cel.status,
                 'userId', cel.user_id,
+                'workflowMetadata', cel.workflow_metadata,
                 'visibility', el.visibility,
                 'event_id', cel.event_id,
                 'type', el.type,
@@ -1020,8 +1543,10 @@ export async function getExternalLinksForAllCollectionsService(
         GROUP BY 
           c.id, c.name, c.type, c.visibility, 
           c.color, c.description, c.created_at, 
-          c.icon, c.updated_at, c.event_id,
-          c.status, c.hashtags
+          c.icon, c.updated_at, c.start_date,
+          c.end_date, c.source_template_id, c.event_id,
+          c.status, c.tenant_id, c.user_id, c.hashtags,
+          c.workflow_metadata
       )
       SELECT jsonb_agg(
         jsonb_build_object(
@@ -1033,10 +1558,14 @@ export async function getExternalLinksForAllCollectionsService(
           'description', description,
           'created_at', created_at,
           'updated_at', updated_at,
+          'startDate', start_date,
+          'endDate', end_date,
+          'sourceTemplateId', source_template_id,
           'event_id', event_id,
           'icon', icon,
           'is_pinned', is_pinned,
           'status', status,
+          'workflowMetadata', workflow_metadata,
           'tenant_id', tenant_id,
           'user_id', user_id,
           'hashtags', CASE WHEN hashtags IS NULL THEN '[]'::jsonb ELSE jsonb_build_array(hashtags) END,
@@ -1085,10 +1614,12 @@ export async function getExternalLinksForCollectionByIdService(
           c.updated_at,
           c.start_date,
           c.end_date,
+          c.source_template_id,
           c.event_id,
           c.status,
           c.tenant_id,
           c.hashtags,
+          c.workflow_metadata,
           EXISTS (
             SELECT 1 FROM pinned_items 
             WHERE user_id = ${userId} 
@@ -1128,6 +1659,7 @@ export async function getExternalLinksForCollectionByIdService(
                 'image_url', el.image_url,
                 'event_id', cel.event_id,
                 'status', cel.status,
+                'workflowMetadata', cel.workflow_metadata,
                 'tenantId', el.tenant_id,
                 'userId', cel.user_id,
                 'sortOrder', cel.sort_order,
@@ -1259,8 +1791,8 @@ export async function getExternalLinksForCollectionByIdService(
         FROM collections c
         LEFT JOIN collection_external_links cel ON c.id = cel.collection_id
         LEFT JOIN external_links el ON cel.external_link_id = el.id
-        WHERE c.type = 'external' AND c.id = ${collectionId}
-        GROUP BY c.id, c.name, c.type, c.visibility, c.color, c.icon, c.description, c.created_at, c.updated_at, c.start_date, c.end_date, c.event_id, c.status, c.tenant_id, c.hashtags
+        WHERE c.type IN ('external', 'workflow_template', 'workflow_instance') AND c.id = ${collectionId}
+        GROUP BY c.id, c.name, c.type, c.visibility, c.color, c.icon, c.description, c.created_at, c.updated_at, c.start_date, c.end_date, c.source_template_id, c.event_id, c.status, c.tenant_id, c.hashtags, c.workflow_metadata
       ),
       type_ordering AS (
         SELECT 
@@ -1280,10 +1812,12 @@ export async function getExternalLinksForCollectionByIdService(
         cw.updated_at,
         cw.start_date,
         cw.end_date,
+        cw.source_template_id,
         cw.event_id,
         cw.status,
         cw.icon,
         cw.tenant_id,
+        cw.workflow_metadata,
         cw.is_pinned,
         cw.hashtags,
         COALESCE(cw.external_links, '[]'::jsonb) as external_links,
@@ -1742,6 +2276,9 @@ export async function addExternalLinkToCollectionService(
           status: externalLinkData.status || 'pending',
           userId: externalLinkData.userId, // Store the user who created the link
           sortOrder: externalLinkData.sortOrder,
+          workflowMetadata: normalizeWorkflowMetadata(
+            externalLinkData.workflowMetadata
+          ),
         })
         .returning();
 
@@ -1955,14 +2492,22 @@ export async function updateExternalLinkInCollectionService(
         .returning();
 
       //update the collectionExternalLink status
+      const collectionExternalLinkUpdate = {
+        collectionId: collectionId,
+        status: updateData.status,
+        eventId: updateData.eventId,
+        ...dateRangeFields,
+      };
+      if (
+        Object.prototype.hasOwnProperty.call(updateData, 'workflowMetadata')
+      ) {
+        collectionExternalLinkUpdate.workflowMetadata =
+          normalizeWorkflowMetadata(updateData.workflowMetadata);
+      }
+
       await tx
         .update(collectionExternalLinks)
-        .set({
-          collectionId: collectionId,
-          status: updateData.status,
-          eventId: updateData.eventId,
-          ...dateRangeFields,
-        })
+        .set(collectionExternalLinkUpdate)
         .where(
           and(
             eq(collectionExternalLinks.externalLinkId, externalLinkId),
@@ -2027,6 +2572,7 @@ export async function getExternalLinksForCollectionService(collectionId) {
         imageMetadata: externalLinks.imageMetadata,
         whiteboardData: externalLinks.whiteboardData,
         status: collectionExternalLinks.status,
+        workflowMetadata: collectionExternalLinks.workflowMetadata,
         startDate: sql`COALESCE(${collectionExternalLinks.startDate}, ${collectionExternalLinks.date})`,
         endDate: sql`COALESCE(${collectionExternalLinks.endDate}, ${collectionExternalLinks.startDate}, ${collectionExternalLinks.date})`,
         date: sql`COALESCE(${collectionExternalLinks.startDate}, ${collectionExternalLinks.date})`,

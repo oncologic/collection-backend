@@ -39,6 +39,18 @@ router.get(
   collectionController.getPinnedCollections
 );
 
+router.post(
+  '/:id/workflow-instance',
+  requireUserAndTenants(),
+  collectionController.createWorkflowInstanceFromTemplate
+);
+
+router.get(
+  '/:id/workflow-timeline',
+  requireUserAndTenants(),
+  collectionController.getWorkflowTimeline
+);
+
 // Use optional auth to allow public/unlisted collections to be viewed without login
 router.get(
   '/:id',

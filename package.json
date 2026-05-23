@@ -16,7 +16,8 @@
     "embeddings": "node src/scripts/manageEmbeddings.js",
     "process-embeddings": "node scripts/processEmbeddings.js",
     "migrate": "node src/db/migrate.js",
-    "seed": "node scripts/seed.js"
+    "seed": "node scripts/seed.js",
+    "seed:workflow-demo": "node scripts/seed-workflow-demo.js"
   },
   "keywords": [],
   "author": "",

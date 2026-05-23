@@ -49,6 +49,8 @@ import {
   getDetailedCollectionExportDataService,
   getExternalLinksForCollectionByIdPaginatedService,
   getResourcesForCollectionByIdPaginatedService,
+  createWorkflowInstanceFromTemplateService,
+  getWorkflowTimelineForCollectionService,
 } from '../services/collectionService.js';
 import { mergeCollections } from './collectionMergeController.js';
 import {
@@ -395,6 +397,41 @@ export const collectionController = {
     }
   },
 
+  async createWorkflowInstanceFromTemplate(req, res) {
+    try {
+      const result = await createWorkflowInstanceFromTemplateService(
+        req.params.id,
+        req.body || {},
+        req.auth.dbUserId,
+        req.tenantIds
+      );
+
+      res.status(201).json(snakeToCamelCase(result));
+    } catch (error) {
+      console.error('Error creating workflow instance:', error);
+      res.status(error.statusCode || 500).json({
+        error: error.message || 'Failed to create workflow instance',
+      });
+    }
+  },
+
+  async getWorkflowTimeline(req, res) {
+    try {
+      const timeline = await getWorkflowTimelineForCollectionService(
+        req.params.id,
+        req.auth.dbUserId,
+        req.tenantIds
+      );
+
+      res.json(snakeToCamelCase(timeline));
+    } catch (error) {
+      console.error('Error fetching workflow timeline:', error);
+      res.status(error.statusCode || 500).json({
+        error: error.message || 'Failed to fetch workflow timeline',
+      });
+    }
+  },
+
   async getCollectionById(req, res) {
     try {
       const tenantIds = req.tenantIds;
@@ -425,7 +462,11 @@ export const collectionController = {
         }
       }
 
-      if (basicCollection.type === 'external') {
+      if (
+        ['external', 'workflow_template', 'workflow_instance'].includes(
+          basicCollection.type
+        )
+      ) {
         const externalLinks = await getExternalLinksForCollectionByIdService(
           basicCollection.id,
           req.auth.dbUserId

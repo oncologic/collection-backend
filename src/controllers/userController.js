@@ -29,6 +29,40 @@ const getForbiddenUserPatchFields = (payload = {}) =>
     Object.prototype.hasOwnProperty.call(payload, field)
   );
 
+const getRoleId = (role) =>
+  typeof role === 'string' ? role : role?.id || role?.value || role?.name;
+
+const roleTenantId = (roleId) => {
+  if (roleId === 'personal') {
+    return process.env.COMMUNITY_TENANT || null;
+  }
+
+  return process.env.KIDNEY_TENANT_ID || null;
+};
+
+const resolveSignupTenant = async ({ clerkUserId, roles, tenantIds }) => {
+  if (tenantIds.includes(process.env.COMMUNITY_TENANT)) {
+    return 'personal';
+  }
+
+  if (roles.some((role) => getRoleId(role) === 'personal')) {
+    return 'personal';
+  }
+
+  try {
+    const clerkUser = await clerkClient.users.getUser(clerkUserId);
+    return (
+      clerkUser.unsafeMetadata?.signup_tenant ||
+      clerkUser.publicMetadata?.signup_tenant ||
+      clerkUser.publicMetadata?.tenant ||
+      'kidney'
+    );
+  } catch (error) {
+    console.warn('Unable to resolve Clerk signup tenant:', error.message);
+    return 'kidney';
+  }
+};
+
 // Simple in-memory cache to prevent rapid duplicate user creation
 const userCreationCache = new Map();
 const CACHE_DURATION = 5000; // 5 seconds
@@ -218,8 +252,31 @@ export const createUser = async (req, res) => {
       });
     }
 
-    const { email, first_name, last_name, roles, tenants } = req.body;
+    const { email, first_name, last_name } = req.body;
+    const incomingRoles = Array.isArray(req.body.roles) ? req.body.roles : [];
+    const incomingTenants = Array.isArray(req.body.tenants)
+      ? req.body.tenants.filter(Boolean)
+      : [];
     const clerkUserId = req.auth.clerkUserId;
+    const signupTenant = await resolveSignupTenant({
+      clerkUserId,
+      roles: incomingRoles,
+      tenantIds: incomingTenants,
+    });
+    const tenants =
+      incomingTenants.length > 0
+        ? incomingTenants
+        : signupTenant === 'personal' && process.env.COMMUNITY_TENANT
+          ? [process.env.COMMUNITY_TENANT]
+          : undefined;
+    const roles = [...incomingRoles];
+
+    if (
+      tenants?.includes(process.env.COMMUNITY_TENANT) &&
+      !roles.some((role) => getRoleId(role) === 'personal')
+    ) {
+      roles.push({ id: 'personal', requires_approval: false });
+    }
 
     // Check if we're already processing a user creation for this Clerk ID
     if (userCreationCache.has(clerkUserId) || clerkUserId !== null) {
@@ -230,11 +287,13 @@ export const createUser = async (req, res) => {
         // write the roles to the existing user
 
         const rolesToAdd = roles.map((role) => {
+          const roleId = getRoleId(role);
           return {
-            name: role.id,
+            name: roleId,
             userId: existingUser.id,
-            value: role.id,
+            value: roleId,
             verified: false,
+            tenantId: roleTenantId(roleId),
           };
         });
 

@@ -43,11 +43,13 @@ export const collections = pgTable('collections', {
   type: varchar('type', { length: 25 }),
   startDate: date('start_date'),
   endDate: date('end_date'),
+  sourceTemplateId: uuid('source_template_id'),
   eventId: uuid('event_id').references(() => events.id),
   tenantId: uuid('tenant_id').references(() => tenants.id),
   hashtags: text('hashtags'),
   publicJsonEnabled: boolean('public_json_enabled').notNull().default(false),
   whiteboardData: jsonb('whiteboard_data'),
+  workflowMetadata: jsonb('workflow_metadata').notNull().default({}),
   // Vector columns for semantic search
   nameEmbedding: vector('name_embedding'),
   descriptionEmbedding: vector('description_embedding'),

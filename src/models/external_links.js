@@ -85,6 +85,7 @@ export const collectionExternalLinks = pgTable(
     organizationId: uuid('organization_id').references(() => organizations.id),
     notes: text('notes'),
     sortOrder: integer('sort_order'),
+    workflowMetadata: jsonb('workflow_metadata').notNull().default({}),
     createdAt: timestamp('created_at').defaultNow(),
     updatedAt: timestamp('updated_at').defaultNow(),
   },

@@ -36,6 +36,13 @@
       "when": 1778452201000,
       "tag": "2026_05_10_add_whiteboard_data_to_collections",
       "breakpoints": false
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1779490000000,
+      "tag": "2026_05_22_add_workflow_metadata",
+      "breakpoints": false
     }
   ]
 }
