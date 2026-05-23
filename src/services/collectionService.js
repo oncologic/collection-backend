@@ -4766,9 +4766,14 @@ export const getBasicCollectionsByIdsService = async (
       .select({
         id: collections.id,
         name: collections.name,
+        description: collections.description,
         type: collections.type,
         visibility: collections.visibility,
         userId: collections.userId,
+        startDate: collections.startDate,
+        endDate: collections.endDate,
+        sourceTemplateId: collections.sourceTemplateId,
+        workflowMetadata: collections.workflowMetadata,
         createdAt: collections.createdAt,
         updatedAt: collections.updatedAt,
       })

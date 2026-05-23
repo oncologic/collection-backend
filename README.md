@@ -101,6 +101,19 @@ ANTHROPIC_API_KEY=
 OCR_SERVICE_URL=
 OCR_API_KEY=
 
+# Optional: route backend chat/text LLM calls through a LiteLLM proxy.
+# The app keeps its existing RAG/reference hydration contract; LiteLLM only
+# replaces the text model gateway used by /api/ai/generate-resource-chat.
+LLM_GATEWAY=litellm
+LITELLM_BASE_URL=http://localhost:4000
+LITELLM_API_KEY=
+LITELLM_DEFAULT_MODEL=gpt-4o-mini
+LITELLM_FAST_MODEL=
+LITELLM_REASONING_MODEL=
+LITELLM_GEMINI_MODEL=
+# Optional JSON for exact legacy-to-proxy model aliases:
+# LITELLM_MODEL_MAP={"claude-haiku-4-5":"my-fast-model","claude-3-5-sonnet-20241022":"my-reasoning-model","gemini-2.5-flash":"my-default-model"}
+
 AWS_ACCESS_KEY_ID=
 AWS_SECRET_ACCESS_KEY=
 AWS_REGION=
@@ -130,6 +143,27 @@ SLACK_CLIENT_ID=
 SLACK_CLIENT_SECRET=
 SLACK_REDIRECT_URI=
 ```
+
+### LiteLLM setup notes
+
+Use the LiteLLM proxy as an external gateway rather than adding the Python
+package to this Node backend. Pin LiteLLM to a currently patched release before
+deploying. As of May 2026, avoid compromised PyPI releases `1.82.7` and
+`1.82.8`, and use a version at or above the currently patched line for recent
+advisories (`>=1.83.10` based on public vulnerability guidance available at the
+time this README was updated).
+
+Typical local setup:
+
+```bash
+uv tool install 'litellm[proxy]'
+export OPENAI_API_KEY=...
+litellm --model gpt-4o-mini --port 4000
+```
+
+For production, run LiteLLM with a config file, virtual keys, provider API keys
+stored outside the app, and point this backend at the proxy with
+`LITELLM_BASE_URL` and `LITELLM_API_KEY`.
 
 ## Database
 

@@ -67,6 +67,27 @@ const UUID_REGEX =
 const isUuid = (value) =>
   typeof value === 'string' && UUID_REGEX.test(value.trim());
 
+const collectReferenceIds = (value, ids = new Set()) => {
+  if (!value) return ids;
+
+  if (isUuid(value)) {
+    ids.add(value.trim());
+    return ids;
+  }
+
+  if (Array.isArray(value)) {
+    value.forEach((item) => collectReferenceIds(item, ids));
+    return ids;
+  }
+
+  if (typeof value === 'object') {
+    if (isUuid(value.id)) ids.add(value.id.trim());
+    Object.values(value).forEach((item) => collectReferenceIds(item, ids));
+  }
+
+  return ids;
+};
+
 const normalizeTagName = (value) => String(value || '').trim();
 
 const resolveStructuredExternalLinkTagIds = async (
@@ -724,8 +745,7 @@ export const aiController = {
         };
       }
 
-      // Convert object values to array and extract IDs
-      const idsToFind = new Set(Object.values(processedData.references));
+      const idsToFind = collectReferenceIds(processedData.references);
 
       const basicCollectionData = await getBasicCollectionsByIdsService(
         Array.from(idsToFind),
@@ -780,7 +800,7 @@ export const aiController = {
         );
 
       return {
-        answer: processedData.response,
+        answer: processedData.response || processedData.answer,
         data: {
           collections: basicCollectionData,
           externalLinks: basicExternalLinkData,
@@ -795,7 +815,12 @@ export const aiController = {
       };
     } catch (error) {
       console.error('Error processing collections:', error);
-      return error;
+      return {
+        answer:
+          error?.message ||
+          'Failed to process the AI response. Please try again.',
+        data: {},
+      };
     }
   },
 

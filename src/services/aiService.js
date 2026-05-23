@@ -974,6 +974,299 @@ const MODEL_NAMES = {
   // Add other model names as needed
 };
 
+const WORKFLOW_PLANNING_TERMS = [
+  'app idea',
+  'new idea',
+  'build an app',
+  'build this project',
+  'bring this project to life',
+  'bring this idea to life',
+  'what will be needed',
+  'what is needed',
+  'project plan',
+  'timeline',
+  'workflow',
+  'template',
+];
+
+const isWorkflowPlanningRequest = (prompt = '') => {
+  const lower = String(prompt).toLowerCase();
+  const hasPlanningTerm = WORKFLOW_PLANNING_TERMS.some((term) =>
+    lower.includes(term)
+  );
+  const hasCreationSubject = [
+    'app',
+    'application',
+    'idea',
+    'project',
+    'product',
+    'system',
+    'tool',
+    'website',
+  ].some((term) => lower.includes(term));
+
+  return hasPlanningTerm && hasCreationSubject;
+};
+
+const getWorkflowTemplateContext = async (userId, tenantIds = []) => {
+  if (!tenantIds?.length) return [];
+
+  const results = await db.execute(sql`
+    SELECT
+      c.id,
+      c.name,
+      c.description,
+      c.type,
+      c.visibility,
+      c.start_date,
+      c.end_date,
+      c.source_template_id,
+      c.workflow_metadata,
+      c.tenant_id,
+      c.created_at,
+      c.updated_at,
+      COUNT(DISTINCT cel.external_link_id)::int as external_links_count
+    FROM collections c
+    LEFT JOIN collection_external_links cel ON cel.collection_id = c.id
+    LEFT JOIN collection_collaborators cc
+      ON cc.collection_id = c.id AND cc.user_id = ${userId}
+    WHERE
+      c.tenant_id = ANY(ARRAY[${sql.join(
+        tenantIds.map((id) => sql`${id}::uuid`),
+        sql`, `
+      )}])
+      AND (
+        c.type = 'workflow_template'
+        OR c.workflow_metadata->>'kind' IN ('template', 'workflow_template')
+      )
+      AND (
+        c.visibility = 'public'
+        OR c.visibility = 'unlisted'
+        OR c.user_id = ${userId}
+        OR cc.id IS NOT NULL
+      )
+    GROUP BY c.id
+    ORDER BY c.updated_at DESC
+    LIMIT 10
+  `);
+
+  return results.rows.map((row) => ({
+    id: row.id,
+    title: row.name,
+    name: row.name,
+    description: row.description,
+    type: row.type,
+    content_type: 'collection',
+    search_type: 'collection',
+    similarity_score: '0.995',
+    startDate: row.start_date,
+    endDate: row.end_date,
+    sourceTemplateId: row.source_template_id,
+    workflowMetadata: row.workflow_metadata,
+    externalLinksCount: row.external_links_count,
+    tenant_id: row.tenant_id,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  }));
+};
+
+const mergeRelevantContent = (...contentGroups) => {
+  const seen = new Set();
+  const merged = [];
+
+  contentGroups.flat().forEach((item) => {
+    if (!item?.id) return;
+    const key = `${item.content_type || item.search_type || item.type}:${item.id}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    merged.push(item);
+  });
+
+  return merged;
+};
+
+const extractAiResponseText = (value, seen = new Set()) => {
+  if (value == null) return '';
+
+  if (typeof value === 'string') {
+    const parsed = attemptDeepJsonParse(value);
+    if (parsed !== value) {
+      return extractAiResponseText(parsed, seen);
+    }
+    return value;
+  }
+
+  if (typeof value !== 'object') {
+    return String(value);
+  }
+
+  if (seen.has(value)) return '';
+  seen.add(value);
+
+  const candidates = [
+    value.answer,
+    value.response,
+    value.message,
+    value.description,
+    value.content,
+  ];
+
+  for (const candidate of candidates) {
+    const text = extractAiResponseText(candidate, seen);
+    if (text) return text;
+  }
+
+  return '';
+};
+
+const parseLiteLLMModelMap = () => {
+  if (!process.env.LITELLM_MODEL_MAP) return {};
+
+  try {
+    const parsed = JSON.parse(process.env.LITELLM_MODEL_MAP);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed
+      : {};
+  } catch (error) {
+    console.warn('Invalid LITELLM_MODEL_MAP JSON; ignoring model map');
+    return {};
+  }
+};
+
+const getLiteLLMBaseUrl = () =>
+  (process.env.LITELLM_BASE_URL || process.env.OPENAI_BASE_URL || '').replace(
+    /\/+$/,
+    ''
+  );
+
+const shouldUseLiteLLM = () =>
+  ['litellm', 'openai-compatible'].includes(
+    String(process.env.LLM_GATEWAY || process.env.LLM_PROVIDER || '')
+      .toLowerCase()
+      .trim()
+  ) || Boolean(process.env.LITELLM_BASE_URL);
+
+const joinGatewayUrl = (baseUrl, path) =>
+  `${baseUrl.replace(/\/+$/, '')}/${String(path || '').replace(/^\/+/, '')}`;
+
+const normalizeLiteLLMContent = (content) => {
+  if (Array.isArray(content)) {
+    return content
+      .map((part) =>
+        typeof part === 'string'
+          ? part
+          : part?.text || part?.content || part?.value || ''
+      )
+      .filter(Boolean)
+      .join('\n');
+  }
+
+  return content == null ? '' : String(content);
+};
+
+const mapLiteLLMModelName = (modelName) => {
+  const requestedModel = String(modelName || '').trim();
+  const modelMap = parseLiteLLMModelMap();
+
+  if (requestedModel && modelMap[requestedModel]) {
+    return modelMap[requestedModel];
+  }
+
+  if (
+    requestedModel.toLowerCase().includes('sonnet') &&
+    process.env.LITELLM_REASONING_MODEL
+  ) {
+    return process.env.LITELLM_REASONING_MODEL;
+  }
+
+  if (
+    requestedModel.toLowerCase().includes('haiku') &&
+    process.env.LITELLM_FAST_MODEL
+  ) {
+    return process.env.LITELLM_FAST_MODEL;
+  }
+
+  if (
+    requestedModel.toLowerCase().includes('gemini') &&
+    process.env.LITELLM_GEMINI_MODEL
+  ) {
+    return process.env.LITELLM_GEMINI_MODEL;
+  }
+
+  return (
+    requestedModel ||
+    process.env.LITELLM_DEFAULT_MODEL ||
+    process.env.LITELLM_MODEL ||
+    'gpt-4o-mini'
+  );
+};
+
+const makeLiteLLMChatRequest = async ({
+  prompt,
+  systemPrompt,
+  modelName,
+  temperature,
+  maxTokens,
+  responseFormat,
+}) => {
+  const baseUrl = getLiteLLMBaseUrl();
+  if (!baseUrl) {
+    throw new Error('LITELLM_BASE_URL is required when using LiteLLM');
+  }
+
+  const path =
+    process.env.LITELLM_CHAT_COMPLETIONS_PATH || 'chat/completions';
+  const headers = {
+    'Content-Type': 'application/json',
+  };
+
+  if (process.env.LITELLM_API_KEY) {
+    headers.Authorization = `Bearer ${process.env.LITELLM_API_KEY}`;
+  }
+
+  const body = {
+    model: mapLiteLLMModelName(modelName),
+    messages: [
+      systemPrompt ? { role: 'system', content: systemPrompt } : null,
+      { role: 'user', content: prompt },
+    ].filter(Boolean),
+    temperature,
+    max_tokens: maxTokens,
+  };
+
+  if (responseFormat) {
+    body.response_format = responseFormat;
+  }
+
+  const response = await fetch(joinGatewayUrl(baseUrl, path), {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(
+      `LiteLLM gateway responded with status ${response.status}: ${errorText}`
+    );
+  }
+
+  const result = await response.json();
+  const choice = result.choices?.[0];
+  const content = normalizeLiteLLMContent(
+    choice?.message?.content || choice?.text || result.content
+  );
+
+  return {
+    ...result,
+    content,
+    response: content,
+    answer: content,
+    model: result.model || body.model,
+    provider: 'litellm',
+  };
+};
+
 export const makeAiAgentRequest = async ({
   endpoint = 'recommend-model',
   prompt,
@@ -984,6 +1277,17 @@ export const makeAiAgentRequest = async ({
   maxTokens = 8000,
   options = {},
 }) => {
+  if (shouldUseLiteLLM() && endpoint === 'chat') {
+    return makeLiteLLMChatRequest({
+      prompt,
+      systemPrompt,
+      modelName,
+      temperature,
+      maxTokens,
+      responseFormat: options.response_format,
+    });
+  }
+
   const response = await fetch(`${OCR_SERVICE_URL}${endpoint}`, {
     method: 'POST',
     headers: {
@@ -1841,6 +2145,8 @@ export const generateChatWithAiAgents = async (
       collectionData.organizations,
     ].some((arr) => arr && arr.length > 0);
 
+    const isWorkflowPlanning = isWorkflowPlanningRequest(prompt);
+
     // NEW: Perform semantic search on all content types based on user prompt ONLY if RAG is not disabled
     let relevantContent = [];
     if (!disableRAG && !hasMentionedItems && !hasSelectedItems) {
@@ -1870,8 +2176,12 @@ export const generateChatWithAiAgents = async (
         `);
         const userEmail = userResult.rows[0]?.email;
 
+        const searchPrompt = isWorkflowPlanning
+          ? `${prompt}\n\nAlso search for workflow templates, project plans, app development process steps, implementation timelines, IT intake, development environment setup, approvals, testing, security, deployment, and reusable build process collections.`
+          : prompt;
+
         // Use the new performSemanticSearch with built-in negation handling
-        const searchResult = await performSemanticSearch(prompt, {
+        const searchResult = await performSemanticSearch(searchPrompt, {
           limit: 20,
           threshold: 0.2,
           tenantIds: tenants,
@@ -1895,8 +2205,21 @@ export const generateChatWithAiAgents = async (
 
         // Continue with normal search processing
         relevantContent = searchResult.results || [];
+        if (isWorkflowPlanning) {
+          const workflowTemplateContext = await getWorkflowTemplateContext(
+            userId,
+            tenants
+          );
+          relevantContent = mergeRelevantContent(
+            workflowTemplateContext,
+            relevantContent
+          );
+        }
       } catch (error) {
         console.error('Vector search failed, continuing without RAG:', error);
+        if (isWorkflowPlanning) {
+          relevantContent = await getWorkflowTemplateContext(userId, tenants);
+        }
       }
     } else if (hasMentionedItems) {
       // When items are mentioned, we should use the FETCHED data, not the basic mentioned items
@@ -2159,7 +2482,8 @@ export const generateChatWithAiAgents = async (
       'collections',
       conversationHistory,
       promptType,
-      relevantContent
+      relevantContent,
+      prompt
     );
 
     // Make request using the working makeAiAgentRequest function instead of direct fetch
@@ -2172,6 +2496,28 @@ export const generateChatWithAiAgents = async (
       temperature: promptType === 'marketing' ? 0.7 : 0.4,
       maxTokens: 8000,
     });
+
+    const responseText = extractAiResponseText(chatResponse);
+    const referencedIdsFromText = new Set(
+      String(responseText).match(
+        /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi
+      ) || []
+    );
+    const retrievedIds = new Set(relevantContent.map((item) => String(item.id)));
+    const textReferences = Array.from(referencedIdsFromText).filter((id) =>
+      retrievedIds.has(String(id))
+    );
+    const existingReferences =
+      chatResponse.references && typeof chatResponse.references === 'object'
+        ? chatResponse.references
+        : {};
+    const fallbackReferences =
+      Object.keys(existingReferences).length > 0 || textReferences.length > 0
+        ? {}
+        : relevantContent.reduce((refs, item, index) => {
+            refs[`retrieved_${index}`] = item.id;
+            return refs;
+          }, {});
 
     // NEW: Add metadata about retrieved content
     if (relevantContent.length > 0) {
@@ -2188,7 +2534,17 @@ export const generateChatWithAiAgents = async (
       }));
     }
 
-    return chatResponse;
+    return {
+      ...chatResponse,
+      response: responseText,
+      references:
+        Object.keys(existingReferences).length > 0
+          ? existingReferences
+          : textReferences.reduce((refs, id, index) => {
+              refs[`ref_${index}`] = id;
+              return refs;
+            }, fallbackReferences),
+    };
   } catch (error) {
     console.error('Error in generateChatWithAiAgents:', error);
     return {
@@ -2206,7 +2562,8 @@ const generateStreamlinedSystemPrompt = (
   type,
   history,
   promptType,
-  relevantContent = []
+  relevantContent = [],
+  prompt = ''
 ) => {
   if (promptType === 'marketing') {
     return marketingPrompt(details);
@@ -2216,6 +2573,7 @@ const generateStreamlinedSystemPrompt = (
   const hasMentionedItems = relevantContent.some(
     (item) => parseFloat(item.similarity_score || item.similarity || 0) === 1.0
   );
+  const isWorkflowPlanning = isWorkflowPlanningRequest(prompt);
 
   // Build the relevant resources section if we have any
   let relevantResourcesSection = '';
@@ -2232,6 +2590,9 @@ const generateStreamlinedSystemPrompt = (
 
   return [
     'You are a helful medical and research AI assistant on a mission to help find the best resources and to combat misinformation. Follow these rules strictly:',
+    isWorkflowPlanning
+      ? 'WORKFLOW PLANNING MODE: The user is asking how to bring an app, system, tool, or project idea to life. Search and reason over workflow template collections and referenced resources. If a workflow template collection is relevant, mention it by name, explain why it fits, and include its exact ID in the final references so the UI can offer a project creation workflow.'
+      : '',
     '1. Your response should contain human-readable content explaining why the data was selected',
     '2. We need ids from everything that you are referencing in your answer at the end, this should be a comma separated list of id after a colon at the very end of your full response, DO NOT PUT IT inline. Never return something like Resources ID: - you should strickly follow the format we have provided.',
     '3. No explicit medical advice and prioritize the context provided.',
