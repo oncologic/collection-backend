@@ -432,51 +432,36 @@ EXAMPLE RESPONSE (shortened):
     const eventDetails = buildEventDetails(contextDetails);
     const userPrompt = buildPrompt(prompt, externalContent);
 
-    // Use the structured endpoint like other services
-    const response = await fetch(`${OCR_SERVICE_URL}structured`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-API-Key': OCR_API_KEY,
+    const result = await makeStructuredAiRequest({
+      prompt: userPrompt,
+      systemPrompt,
+      modelProvider,
+      modelName,
+      temperature: 0.7,
+      maxTokens: 4000,
+      serviceName: 'OCR structured description service',
+      exampleFormat: {
+        answer: 'Opportunity generated successfully.',
+        data: [
+          {
+            title: 'Example Opportunity Title',
+            description:
+              'Detailed description of the opportunity, responsibilities, and impact.',
+            requirements: 'List key requirements or leave empty string',
+            responsibilities: 'Outline what the person will do',
+            isVolunteer: true,
+            compensationType: '',
+            timeCommitment: '2 hours per week',
+            frequency: 'weekly',
+            duration: '3 months',
+            isRemote: true,
+            location: null,
+            requiredSkills: ['communication', 'organization'],
+            preferredSkills: ['public speaking'],
+          },
+        ],
       },
-      body: JSON.stringify({
-        prompt: userPrompt,
-        system_prompt: systemPrompt,
-        model_provider: modelProvider,
-        model_name: modelName,
-        temperature: 0.7,
-        max_tokens: 4000,
-        example_format: {
-          answer: 'Opportunity generated successfully.',
-          data: [
-            {
-              title: 'Example Opportunity Title',
-              description:
-                'Detailed description of the opportunity, responsibilities, and impact.',
-              requirements: 'List key requirements or leave empty string',
-              responsibilities: 'Outline what the person will do',
-              isVolunteer: true,
-              compensationType: '',
-              timeCommitment: '2 hours per week',
-              frequency: 'weekly',
-              duration: '3 months',
-              isRemote: true,
-              location: null,
-              requiredSkills: ['communication', 'organization'],
-              preferredSkills: ['public speaking'],
-            },
-          ],
-        },
-      }),
     });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error('OCR service error response:', errorText);
-      throw new Error(`OCR service responded with status: ${response.status}`);
-    }
-
-    const result = await response.json();
 
     // Validate the response structure
     if (!result || typeof result !== 'object') {
@@ -1167,6 +1152,8 @@ const normalizeLiteLLMContent = (content) => {
 const mapLiteLLMModelName = (modelName) => {
   const requestedModel = String(modelName || '').trim();
   const modelMap = parseLiteLLMModelMap();
+  const configuredDefault =
+    process.env.LITELLM_DEFAULT_MODEL || process.env.LITELLM_MODEL;
 
   if (requestedModel && modelMap[requestedModel]) {
     return modelMap[requestedModel];
@@ -1178,12 +1165,18 @@ const mapLiteLLMModelName = (modelName) => {
   ) {
     return process.env.LITELLM_REASONING_MODEL;
   }
+  if (requestedModel.toLowerCase().includes('sonnet') && configuredDefault) {
+    return configuredDefault;
+  }
 
   if (
     requestedModel.toLowerCase().includes('haiku') &&
     process.env.LITELLM_FAST_MODEL
   ) {
     return process.env.LITELLM_FAST_MODEL;
+  }
+  if (requestedModel.toLowerCase().includes('haiku') && configuredDefault) {
+    return configuredDefault;
   }
 
   if (
@@ -1192,13 +1185,11 @@ const mapLiteLLMModelName = (modelName) => {
   ) {
     return process.env.LITELLM_GEMINI_MODEL;
   }
+  if (requestedModel.toLowerCase().includes('gemini') && configuredDefault) {
+    return configuredDefault;
+  }
 
-  return (
-    requestedModel ||
-    process.env.LITELLM_DEFAULT_MODEL ||
-    process.env.LITELLM_MODEL ||
-    'gpt-4o-mini'
-  );
+  return requestedModel || configuredDefault || 'gpt-4o-mini';
 };
 
 const makeLiteLLMChatRequest = async ({
@@ -1265,6 +1256,87 @@ const makeLiteLLMChatRequest = async ({
     model: result.model || body.model,
     provider: 'litellm',
   };
+};
+
+const coerceStructuredLLMResult = (value) => {
+  const parsed = extractStructuredObject(value);
+
+  if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+    return parsed;
+  }
+
+  if (typeof parsed === 'string') {
+    const nested = extractStructuredObject(parsed);
+    if (nested && typeof nested === 'object' && !Array.isArray(nested)) {
+      return nested;
+    }
+  }
+
+  throw new Error('Received malformed JSON response from AI service');
+};
+
+const makeStructuredAiRequest = async ({
+  prompt,
+  systemPrompt,
+  exampleFormat,
+  modelProvider = MODEL_PROVIDERS.GOOGLE,
+  modelName = MODEL_NAMES.GEMINI_FLASH,
+  temperature = 0.4,
+  maxTokens = 8000,
+  serviceName = 'Structured AI service',
+  extraBody = {},
+}) => {
+  if (shouldUseLiteLLM()) {
+    const formatHint = exampleFormat
+      ? `\n\nReturn only valid JSON matching this example shape:\n${JSON.stringify(
+          exampleFormat,
+          null,
+          2
+        )}`
+      : '\n\nReturn only valid JSON.';
+    const response = await makeLiteLLMChatRequest({
+      prompt,
+      systemPrompt: `${systemPrompt || ''}${formatHint}`,
+      modelName,
+      temperature,
+      maxTokens,
+      responseFormat:
+        process.env.LITELLM_DISABLE_JSON_RESPONSE_FORMAT === 'true'
+          ? undefined
+          : { type: 'json_object' },
+    });
+
+    return coerceStructuredLLMResult(response.content || response.response);
+  }
+
+  const response = await fetch(`${OCR_SERVICE_URL}structured`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-API-Key': OCR_API_KEY,
+    },
+    body: JSON.stringify({
+      prompt,
+      system_prompt: systemPrompt,
+      example_format: exampleFormat,
+      temperature,
+      max_tokens: maxTokens,
+      model_provider: modelProvider,
+      model_name: modelName,
+      ...extraBody,
+    }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    console.error(`${serviceName} error response:`, errorText);
+    throw new Error(
+      `${serviceName} responded with status: ${response.status}`
+    );
+  }
+
+  const result = await response.json();
+  return coerceStructuredLLMResult(result);
 };
 
 export const makeAiAgentRequest = async ({
@@ -2694,40 +2766,25 @@ export const makeLargePromptRequest = async ({
   chunkOverlap = 2000,
   originalQuestion = null,
 }) => {
-  // Use structured endpoint which supports large prompts
-  const response = await fetch(`${OCR_SERVICE_URL}structured`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-API-Key': OCR_API_KEY,
+  return makeStructuredAiRequest({
+    prompt,
+    systemPrompt,
+    modelProvider,
+    modelName,
+    temperature,
+    maxTokens,
+    serviceName: 'Large prompt service',
+    exampleFormat: {
+      answer: '',
+      data: [],
     },
-    body: JSON.stringify({
-      prompt,
-      system_prompt: systemPrompt,
-      model_provider: modelProvider,
-      model_name: modelName,
-      temperature,
-      max_tokens: maxTokens,
+    extraBody: {
       processing_strategy: processingStrategy,
       chunk_size: chunkSize,
       chunk_overlap: chunkOverlap,
       original_question: originalQuestion || prompt,
-      example_format: {
-        answer: '',
-        data: [],
-      },
-    }),
+    },
   });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    console.error('Large prompt service error response:', errorText);
-    throw new Error(
-      `Large prompt service responded with status: ${response.status}`
-    );
-  }
-
-  return response.json();
 };
 
 // Service function to generate structured notations
@@ -2818,30 +2875,16 @@ RESPONSE FORMAT: Must be valid JSON with "answer" and "data" keys. Keep answer b
 
 Current date context: ${new Date().toISOString().split('T')[0]} but that is UTC date and time assume the user is in central time unless they specify or tell you otherwise.`;
 
-    const response = await fetch(`${OCR_SERVICE_URL}structured`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-API-Key': OCR_API_KEY,
-      },
-      body: JSON.stringify({
-        prompt: userPrompt,
-        system_prompt: systemPrompt,
-        example_format: exampleFormat,
-        temperature: 0.4,
-        max_tokens: 8000,
-        model_provider: 'anthropic',
-        model_name: 'claude-haiku-4-5',
-      }),
+    const result = await makeStructuredAiRequest({
+      prompt: userPrompt,
+      systemPrompt,
+      exampleFormat,
+      temperature: 0.4,
+      maxTokens: 8000,
+      modelProvider: 'anthropic',
+      modelName: 'claude-haiku-4-5',
+      serviceName: 'Structured notation service',
     });
-
-    if (!response.ok) {
-      throw new Error(
-        `Structured notation service responded with status: ${response.status}`
-      );
-    }
-
-    const result = await response.json();
 
     // Add validation and processing for the response
     if (typeof result === 'string') {
@@ -3079,30 +3122,16 @@ ${effectiveOrgId ? `12. MANDATORY: Include organization ID ${effectiveOrgId} in 
 
 RESPONSE FORMAT: Must be valid JSON with "answer" and "data" keys. Keep answer brief.`;
 
-    const response = await fetch(`${OCR_SERVICE_URL}structured`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-API-Key': OCR_API_KEY,
-      },
-      body: JSON.stringify({
-        prompt: userPrompt,
-        system_prompt: systemPrompt,
-        example_format: exampleFormat,
-        temperature: 0.4,
-        max_tokens: 8000,
-        model_provider: 'anthropic',
-        model_name: 'claude-haiku-4-5',
-      }),
+    const result = await makeStructuredAiRequest({
+      prompt: userPrompt,
+      systemPrompt,
+      exampleFormat,
+      temperature: 0.4,
+      maxTokens: 8000,
+      modelProvider: 'anthropic',
+      modelName: 'claude-haiku-4-5',
+      serviceName: 'Structured resource service',
     });
-
-    if (!response.ok) {
-      throw new Error(
-        `Structured resource service responded with status: ${response.status}`
-      );
-    }
-
-    const result = await response.json();
 
     // Add validation and processing for the response
     if (typeof result === 'string') {
@@ -3369,30 +3398,16 @@ IMPORTANT RULES:
 17. When an event title includes an organization name (like "JOEY'S WINGS 5K CHARITY RUN"), that organization MUST be included in the organizations array.
 RESPONSE FORMAT: Must be valid JSON with "answer" and "data" keys. Keep answer brief.`;
 
-    const response = await fetch(`${OCR_SERVICE_URL}structured`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-API-Key': OCR_API_KEY,
-      },
-      body: JSON.stringify({
-        prompt: userPrompt,
-        system_prompt: systemPrompt,
-        example_format: exampleFormat,
-        temperature: 0.4,
-        max_tokens: 8000,
-        model_provider: 'anthropic',
-        model_name: 'claude-haiku-4-5',
-      }),
+    const result = await makeStructuredAiRequest({
+      prompt: userPrompt,
+      systemPrompt,
+      exampleFormat,
+      temperature: 0.4,
+      maxTokens: 8000,
+      modelProvider: 'anthropic',
+      modelName: 'claude-haiku-4-5',
+      serviceName: 'Structured event service',
     });
-
-    if (!response.ok) {
-      throw new Error(
-        `Structured event service responded with status: ${response.status}`
-      );
-    }
-
-    const result = await response.json();
 
     // Add validation and processing for the response
     if (typeof result === 'string') {
@@ -3537,34 +3552,16 @@ RESPONSE FORMAT: Must be valid JSON with "answer" and "data" keys. The "answer" 
       ],
     };
 
-    const requestBody = {
+    const result = await makeStructuredAiRequest({
       prompt: userPrompt,
-      system_prompt: systemPrompt,
-      example_format: exampleFormat,
+      systemPrompt,
+      exampleFormat,
       temperature: 0.3,
-      max_tokens: 4000,
-      model_provider: 'anthropic',
-      model_name: 'claude-haiku-4-5',
-    };
-
-    const response = await fetch(`${OCR_SERVICE_URL}structured`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-API-Key': OCR_API_KEY,
-      },
-      body: JSON.stringify(requestBody),
+      maxTokens: 4000,
+      modelProvider: 'anthropic',
+      modelName: 'claude-haiku-4-5',
+      serviceName: 'Organization extraction service',
     });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error('Organization extraction error:', errorText);
-      throw new Error(
-        `Organization extraction service responded with status: ${response.status}. Details: ${errorText}`
-      );
-    }
-
-    const result = await response.json();
 
     // Parse response if it's a string
     let parsedResult = result;
@@ -4012,28 +4009,14 @@ RESPONSE FORMAT: Must be valid JSON with "answer" and "data" keys. The "data" ar
 
 USER'S UPDATE REQUEST: ${userPrompt}`;
 
-    const response = await fetch(`${OCR_SERVICE_URL}structured`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-API-Key': OCR_API_KEY,
-      },
-      body: JSON.stringify({
-        prompt: `Based on the existing notations provided, please analyze this update request and return only the notations that need to be modified. Pay special attention to date interpretation: ${userPrompt}`,
-        system_prompt: systemPrompt,
-        example_format: exampleFormat,
-        temperature: 0.3,
-        max_tokens: 8000,
-      }),
+    const result = await makeStructuredAiRequest({
+      prompt: `Based on the existing notations provided, please analyze this update request and return only the notations that need to be modified. Pay special attention to date interpretation: ${userPrompt}`,
+      systemPrompt,
+      exampleFormat,
+      temperature: 0.3,
+      maxTokens: 8000,
+      serviceName: 'Bulk update service',
     });
-
-    if (!response.ok) {
-      throw new Error(
-        `Bulk update service responded with status: ${response.status}`
-      );
-    }
-
-    const result = await response.json();
 
     // Add validation and processing for the response
     if (typeof result === 'string') {
@@ -4284,30 +4267,16 @@ IMPORTANT RULES:
 
 RESPONSE FORMAT: Must be valid JSON with "answer" and "data" keys. Keep answer brief.`;
 
-    const response = await fetch(`${OCR_SERVICE_URL}structured`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-API-Key': OCR_API_KEY,
-      },
-      body: JSON.stringify({
-        prompt: userPrompt,
-        system_prompt: systemPrompt,
-        example_format: exampleFormat,
-        temperature: 0.4,
-        max_tokens: 8000,
-        model_provider: 'anthropic',
-        model_name: 'claude-haiku-4-5',
-      }),
+    const result = await makeStructuredAiRequest({
+      prompt: userPrompt,
+      systemPrompt,
+      exampleFormat,
+      temperature: 0.4,
+      maxTokens: 8000,
+      modelProvider: 'anthropic',
+      modelName: 'claude-haiku-4-5',
+      serviceName: 'Structured external links service',
     });
-
-    if (!response.ok) {
-      throw new Error(
-        `Structured external links service responded with status: ${response.status}`
-      );
-    }
-
-    const result = await response.json();
 
     // Add validation and processing for the response
     if (typeof result === 'string') {
@@ -4470,32 +4439,16 @@ Current date context: ${new Date().toISOString().split('T')[0]}
 
 RESPONSE FORMAT: Must be valid JSON with "answer" and "data" keys. Keep answer brief.`;
 
-    const response = await fetch(`${OCR_SERVICE_URL}structured`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-API-Key': OCR_API_KEY,
-      },
-      body: JSON.stringify({
-        prompt: userPrompt,
-        system_prompt: systemPrompt,
-        example_format: exampleFormat,
-        temperature: 0.4,
-        max_tokens: 4000,
-        model_provider: 'anthropic',
-        model_name: 'claude-haiku-4-5',
-      }),
+    const result = await makeStructuredAiRequest({
+      prompt: userPrompt,
+      systemPrompt,
+      exampleFormat,
+      temperature: 0.4,
+      maxTokens: 4000,
+      modelProvider: 'anthropic',
+      modelName: 'claude-haiku-4-5',
+      serviceName: 'Structured opportunity service',
     });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error('Structured opportunity service error:', errorText);
-      throw new Error(
-        `Structured opportunity service responded with status: ${response.status}`
-      );
-    }
-
-    const result = await response.json();
 
     // Parse response if it's a string
     let parsedResult = result;
@@ -4742,30 +4695,16 @@ PLATFORM MATCHING:
 
 RESPONSE FORMAT: Must be valid JSON with "answer" and "data" keys. Each item in data array should include suggestedAssociations object.`;
 
-    const response = await fetch(`${OCR_SERVICE_URL}structured`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-API-Key': OCR_API_KEY,
-      },
-      body: JSON.stringify({
-        prompt: userPrompt,
-        system_prompt: enhancedSystemPrompt,
-        example_format: exampleFormat,
-        temperature: 0.3,
-        max_tokens: 4000,
-        model_provider: 'anthropic',
-        model_name: 'claude-haiku-4-5',
-      }),
+    const result = await makeStructuredAiRequest({
+      prompt: userPrompt,
+      systemPrompt: enhancedSystemPrompt,
+      exampleFormat,
+      temperature: 0.3,
+      maxTokens: 4000,
+      modelProvider: 'anthropic',
+      modelName: 'claude-haiku-4-5',
+      serviceName: 'Structured social media service',
     });
-
-    if (!response.ok) {
-      throw new Error(
-        `Structured social media service responded with status: ${response.status}`
-      );
-    }
-
-    const result = await response.json();
 
     // Handle string response
     let parsedResult = result;

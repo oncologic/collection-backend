@@ -102,8 +102,9 @@ OCR_SERVICE_URL=
 OCR_API_KEY=
 
 # Optional: route backend chat/text LLM calls through a LiteLLM proxy.
-# The app keeps its existing RAG/reference hydration contract; LiteLLM only
-# replaces the text model gateway used by /api/ai/generate-resource-chat.
+# The app keeps its existing RAG/reference hydration contract. LiteLLM replaces
+# the text model gateway for chat and structured text generation. OCR/image
+# processing still uses OCR_SERVICE_URL.
 LLM_GATEWAY=litellm
 LITELLM_BASE_URL=http://localhost:4000
 LITELLM_API_KEY=
@@ -111,6 +112,7 @@ LITELLM_DEFAULT_MODEL=gpt-4o-mini
 LITELLM_FAST_MODEL=
 LITELLM_REASONING_MODEL=
 LITELLM_GEMINI_MODEL=
+LITELLM_DISABLE_JSON_RESPONSE_FORMAT=false
 # Optional JSON for exact legacy-to-proxy model aliases:
 # LITELLM_MODEL_MAP={"claude-haiku-4-5":"my-fast-model","claude-3-5-sonnet-20241022":"my-reasoning-model","gemini-2.5-flash":"my-default-model"}
 
