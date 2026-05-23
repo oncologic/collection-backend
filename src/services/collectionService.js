@@ -960,6 +960,34 @@ export async function createWorkflowInstanceFromTemplateService(
 
   const projectStartDate = toDateString(options.startDate) || toDateString(new Date());
   const includeResources = options.includeResources !== false;
+  const stepDateOverrides = Array.isArray(options.stepDateOverrides)
+    ? options.stepDateOverrides.reduce((map, override) => {
+        const overrideStartDate = toDateString(override.startDate);
+        if (!overrideStartDate) return map;
+
+        const overrideEndDate =
+          toDateString(override.endDate) || overrideStartDate;
+        const normalizedOverride = {
+          startDate: overrideStartDate,
+          endDate:
+            overrideEndDate < overrideStartDate
+              ? overrideStartDate
+              : overrideEndDate,
+        };
+
+        [
+          override.templateStepId,
+          override.associationId,
+          override.externalLinkId,
+        ]
+          .filter(Boolean)
+          .forEach((id) => {
+            map.set(String(id), normalizedOverride);
+          });
+
+        return map;
+      }, new Map())
+    : new Map();
 
   return db.transaction(async (tx) => {
     const templateSteps = await tx
@@ -1080,6 +1108,16 @@ export async function createWorkflowInstanceFromTemplateService(
         previousEndDate,
         index
       );
+      const dateOverride =
+        stepDateOverrides.get(String(step.associationId)) ||
+        stepDateOverrides.get(String(step.externalLinkId));
+      const stepDates = dateOverride
+        ? {
+            date: dateOverride.startDate,
+            startDate: dateOverride.startDate,
+            endDate: dateOverride.endDate,
+          }
+        : calculatedDates;
 
       const [createdStep] = await tx
         .insert(collectionExternalLinks)
@@ -1087,9 +1125,9 @@ export async function createWorkflowInstanceFromTemplateService(
           collectionId: createdCollection.id,
           externalLinkId: step.externalLinkId,
           userId,
-          date: calculatedDates.date,
-          startDate: calculatedDates.startDate,
-          endDate: calculatedDates.endDate,
+          date: stepDates.date,
+          startDate: stepDates.startDate,
+          endDate: stepDates.endDate,
           status:
             options.initialStepStatus ||
             stepMetadata.initialStatus ||
@@ -1124,9 +1162,9 @@ export async function createWorkflowInstanceFromTemplateService(
         );
       }
 
-      previousEndDate = calculatedDates.endDate;
-      if (calculatedDates.endDate && calculatedDates.endDate > projectEndDate) {
-        projectEndDate = calculatedDates.endDate;
+      previousEndDate = stepDates.endDate;
+      if (stepDates.endDate && stepDates.endDate > projectEndDate) {
+        projectEndDate = stepDates.endDate;
       }
 
       clonedSteps.push({
