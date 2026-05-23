@@ -24,6 +24,7 @@ import {
   advancedNegationDetection,
 } from './vectorService.js';
 
+dotenv.config({ path: '.env.local' });
 dotenv.config();
 
 const openai = new OpenAI({
@@ -1119,10 +1120,12 @@ const parseLiteLLMModelMap = () => {
 };
 
 const getLiteLLMBaseUrl = () =>
-  (process.env.LITELLM_BASE_URL || process.env.OPENAI_BASE_URL || '').replace(
-    /\/+$/,
+  (
+    process.env.LITELLM_BASE_URL ||
+    process.env.OPENAI_COMPATIBLE_BASE_URL ||
+    process.env.OPENAI_BASE_URL ||
     ''
-  );
+  ).replace(/\/+$/, '');
 
 const shouldUseLiteLLM = () =>
   ['litellm', 'openai-compatible'].includes(
@@ -1202,7 +1205,9 @@ const makeLiteLLMChatRequest = async ({
 }) => {
   const baseUrl = getLiteLLMBaseUrl();
   if (!baseUrl) {
-    throw new Error('LITELLM_BASE_URL is required when using LiteLLM');
+    throw new Error(
+      'LITELLM_BASE_URL or OPENAI_COMPATIBLE_BASE_URL is required when using an LLM gateway'
+    );
   }
 
   const path =
@@ -1211,8 +1216,10 @@ const makeLiteLLMChatRequest = async ({
     'Content-Type': 'application/json',
   };
 
-  if (process.env.LITELLM_API_KEY) {
-    headers.Authorization = `Bearer ${process.env.LITELLM_API_KEY}`;
+  const gatewayApiKey =
+    process.env.LITELLM_API_KEY || process.env.OPENAI_COMPATIBLE_API_KEY;
+  if (gatewayApiKey) {
+    headers.Authorization = `Bearer ${gatewayApiKey}`;
   }
 
   const body = {
