@@ -38,8 +38,6 @@ export const users = pgTable('users', {
     .default('active'), // active, cancelled, expired
   subscriptionStartDate: timestamp('subscription_start_date').defaultNow(),
   subscriptionEndDate: timestamp('subscription_end_date'),
-  stripeCustomerId: varchar('stripe_customer_id', { length: 100 }),
-  stripeSubscriptionId: varchar('stripe_subscription_id', { length: 100 }),
   superuser: boolean('superuser').notNull().default(false),
 });
 

@@ -22,6 +22,18 @@ router.get(
   attachmentController.searchAttachments
 );
 
+router.post(
+  '/upload-intent',
+  requireUserAndTenants(),
+  attachmentController.createUploadIntent
+);
+
+router.post(
+  '/upload-complete',
+  requireUserAndTenants(),
+  attachmentController.completeUpload
+);
+
 router.patch(
   '/:id',
   requireUserAndTenants(),

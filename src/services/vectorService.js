@@ -1,4 +1,5 @@
 import { db } from '../db/index.js';
+import dotenv from 'dotenv';
 
 import { resources, resourceTags } from '../models/resources.js';
 import { collections } from '../models/collections.js';
@@ -10,6 +11,7 @@ import {
 import { collectionExternalLinkTagDefinitions } from '../models/collectionExternalLinkTags.js';
 import { linkGroups } from '../models/linkGroup.js';
 import { attachments } from '../models/attachments.js';
+import { events } from '../models/events.js';
 import {
   organizations,
   organizationResources,
@@ -21,16 +23,47 @@ import {
   normalizeSemanticSearchResult,
 } from './semanticSearchUtils.js';
 
-// Configure your embedding API - using OpenAI as example
-const EMBEDDING_API_URL = 'https://api.openai.com/v1/embeddings';
-const EMBEDDING_MODEL = 'text-embedding-3-small'; // Or 'text-embedding-ada-002'
+dotenv.config({ path: '.env.local' });
+dotenv.config();
+
+const parsePositiveInteger = (value, fallback) => {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+};
+
+// Configure embeddings. The database currently stores vector(1536), so local
+// embedding vectors are normalized to the configured storage dimension.
+const EMBEDDING_PROVIDER = String(
+  process.env.EMBEDDING_PROVIDER || 'openai'
+).toLowerCase();
+const EMBEDDING_API_URL =
+  process.env.EMBEDDING_API_URL || 'https://api.openai.com/v1/embeddings';
+const EMBEDDING_OLLAMA_BASE_URL = (
+  process.env.EMBEDDING_BASE_URL ||
+  process.env.OLLAMA_BASE_URL ||
+  'http://localhost:11434'
+).replace(/\/+$/, '');
+const EMBEDDING_OLLAMA_PATH =
+  process.env.EMBEDDING_OLLAMA_PATH || '/api/embed';
+const EMBEDDING_MODEL =
+  process.env.EMBEDDING_MODEL ||
+  (EMBEDDING_PROVIDER === 'ollama'
+    ? 'nomic-embed-text'
+    : 'text-embedding-3-small');
 const EMBEDDING_DIMENSIONS = 1536;
+const EMBEDDING_MODEL_DIMENSIONS = parsePositiveInteger(
+  process.env.EMBEDDING_MODEL_DIMENSIONS,
+  EMBEDDING_PROVIDER === 'ollama' ? 768 : EMBEDDING_DIMENSIONS
+);
 
 // Token limits for different models
 const MODEL_TOKEN_LIMITS = {
   'text-embedding-3-small': 8192,
   'text-embedding-3-large': 8192,
   'text-embedding-ada-002': 8192,
+  'nomic-embed-text': 8192,
+  'mxbai-embed-large': 512,
+  'all-minilm': 256,
 };
 
 // More conservative token estimation - actual tokens can be higher than this estimate
@@ -40,6 +73,8 @@ const MAX_TOKENS = MODEL_TOKEN_LIMITS[EMBEDDING_MODEL] || 8192;
 // Leave some buffer for safety (use 90% of max tokens)
 const SAFE_MAX_TOKENS = Math.floor(MAX_TOKENS * 0.9); // ~7372 tokens
 const MAX_CHARS = SAFE_MAX_TOKENS * CHARS_PER_TOKEN;
+
+let hasLoggedEmbeddingDimensionNormalization = false;
 
 // 🚀 MEMORY MANAGEMENT CONFIGURATION
 const MEMORY_CONFIG = {
@@ -174,10 +209,11 @@ const memoryCleanup = {
   },
 };
 
-// Start memory monitoring
-setInterval(() => {
+// Start lightweight memory logging without keeping CLI processes alive.
+const passiveMemoryLogInterval = setInterval(() => {
   memoryCleanup.logMemoryUsage('(periodic check)');
 }, MEMORY_CONFIG.CLEANUP_INTERVAL_MS);
+passiveMemoryLogInterval.unref?.();
 
 // 🔄 RATE LIMITED API CALLS
 let lastApiCall = 0;
@@ -396,8 +432,122 @@ export const generateChunkedEmbedding = async (text) => {
   }
 };
 
+const normalizeEmbeddingDimensions = (embedding) => {
+  if (!Array.isArray(embedding)) {
+    throw new Error('Embedding provider returned a non-array embedding');
+  }
+
+  const numericEmbedding = embedding.map((value) =>
+    typeof value === 'number' ? value : Number(value)
+  );
+
+  if (numericEmbedding.some((value) => !Number.isFinite(value))) {
+    throw new Error('Embedding provider returned non-numeric values');
+  }
+
+  if (numericEmbedding.length === EMBEDDING_DIMENSIONS) {
+    return numericEmbedding;
+  }
+
+  if (!hasLoggedEmbeddingDimensionNormalization) {
+    console.info(
+      `Embedding dimension normalization enabled: provider=${EMBEDDING_PROVIDER}, model=${EMBEDDING_MODEL}, modelDimensions=${numericEmbedding.length}, storageDimensions=${EMBEDDING_DIMENSIONS}`
+    );
+    hasLoggedEmbeddingDimensionNormalization = true;
+  }
+
+  if (numericEmbedding.length > EMBEDDING_DIMENSIONS) {
+    return numericEmbedding.slice(0, EMBEDDING_DIMENSIONS);
+  }
+
+  return [
+    ...numericEmbedding,
+    ...new Array(EMBEDDING_DIMENSIONS - numericEmbedding.length).fill(0),
+  ];
+};
+
+const normalizeEmbeddings = (embeddings) =>
+  embeddings.map((embedding) => normalizeEmbeddingDimensions(embedding));
+
+export const getEmbeddingConfiguration = () => ({
+  provider: EMBEDDING_PROVIDER,
+  model: EMBEDDING_MODEL,
+  modelDimensions: EMBEDDING_MODEL_DIMENSIONS,
+  storageDimensions: EMBEDDING_DIMENSIONS,
+  baseUrl:
+    EMBEDDING_PROVIDER === 'ollama'
+      ? EMBEDDING_OLLAMA_BASE_URL
+      : EMBEDDING_API_URL,
+});
+
+const joinUrl = (baseUrl, path) =>
+  `${baseUrl.replace(/\/+$/, '')}/${String(path || '').replace(/^\/+/, '')}`;
+
+const generateOpenAIEmbeddings = async (input) => {
+  const response = await fetch(EMBEDDING_API_URL, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      input,
+      model: EMBEDDING_MODEL,
+    }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(
+      `Embedding API error: ${response.status} ${response.statusText} - ${errorText}`
+    );
+  }
+
+  const data = await response.json();
+  return data.data.map((item) => item.embedding);
+};
+
+const generateOllamaEmbeddings = async (input) => {
+  const response = await fetch(
+    joinUrl(EMBEDDING_OLLAMA_BASE_URL, EMBEDDING_OLLAMA_PATH),
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: EMBEDDING_MODEL,
+        input,
+      }),
+    }
+  );
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(
+      `Ollama embedding API error: ${response.status} ${response.statusText} - ${errorText}`
+    );
+  }
+
+  const data = await response.json();
+
+  if (Array.isArray(data.embeddings)) {
+    return data.embeddings;
+  }
+
+  if (Array.isArray(data.embedding)) {
+    return [data.embedding];
+  }
+
+  if (Array.isArray(data.data)) {
+    return data.data.map((item) => item.embedding).filter(Boolean);
+  }
+
+  throw new Error('Ollama embedding API returned an unsupported response');
+};
+
 /**
- * Generate embeddings using OpenAI API
+ * Generate embeddings using the configured provider
  * @param {string|string[]} texts - Text or array of texts to embed
  * @returns {Promise<number[]|number[][]>} Embedding vector(s)
  */
@@ -446,28 +596,18 @@ export const generateEmbeddings = async (texts) => {
       });
     }
 
-    const response = await fetch(EMBEDDING_API_URL, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        input,
-        model: EMBEDDING_MODEL,
-        // Removed dimensions parameter - using default 1536
-      }),
-    });
+    const rawEmbeddings =
+      EMBEDDING_PROVIDER === 'ollama'
+        ? await generateOllamaEmbeddings(input)
+        : await generateOpenAIEmbeddings(input);
 
-    if (!response.ok) {
-      const errorText = await response.text();
+    if (rawEmbeddings.length !== input.length) {
       throw new Error(
-        `Embedding API error: ${response.status} ${response.statusText} - ${errorText}`
+        `Embedding provider returned ${rawEmbeddings.length} embeddings for ${input.length} inputs`
       );
     }
 
-    const data = await response.json();
-    const embeddings = data.data.map((item) => item.embedding);
+    const embeddings = normalizeEmbeddings(rawEmbeddings);
 
     return isArray ? embeddings : embeddings[0];
   } catch (error) {
@@ -793,8 +933,8 @@ export const updateResourceEmbeddings = async ({
 
       // Update the database with vector embeddings using raw SQL
       await db.execute(sql`
-        UPDATE resources 
-        SET 
+        UPDATE resources
+        SET
           name_embedding = ${JSON.stringify(nameEmbedding)}::vector(1536),
           description_embedding = ${JSON.stringify(descriptionEmbedding)}::vector(1536),
           full_text_embedding = ${JSON.stringify(fullTextEmbedding)}::vector(1536),
@@ -899,7 +1039,7 @@ const buildPermissionFilter = (
     // Kidney tenant: All resources in the tenant
     // Other tenants: All resources in the tenant (default)
     permissionClause = sql`(
-      CASE 
+      CASE
         WHEN tenant_id = ${process.env.COMMUNITY_TENANT}::uuid THEN ${sql.raw(userIdField)} = ${userId}
         ELSE 1 = 1
       END
@@ -1012,7 +1152,7 @@ export const semanticSearchResources = async (searchQuery, options = {}) => {
     }
 
     const results = await db.execute(sql`
-      SELECT 
+      SELECT
         id,
         name,
         description,
@@ -1068,7 +1208,7 @@ export const findSimilarResources = async (resourceId, options = {}) => {
     }
 
     const similarResources = await db.execute(sql`
-      SELECT 
+      SELECT
         id,
         name,
         description,
@@ -1126,8 +1266,8 @@ export const autoUpdateResourceEmbedding = async (resourceId) => {
 
     // Update the database with vector embeddings
     await db.execute(sql`
-      UPDATE resources 
-      SET 
+      UPDATE resources
+      SET
         name_embedding = ${JSON.stringify(nameEmbedding)}::vector(1536),
         description_embedding = ${JSON.stringify(descriptionEmbedding)}::vector(1536),
         full_text_embedding = ${JSON.stringify(fullTextEmbedding)}::vector(1536),
@@ -1255,7 +1395,7 @@ export const semanticSearchResourceTimestamps = async (
     }
 
     const results = await db.execute(sql`
-      SELECT 
+      SELECT
         id,
         name,
         description,
@@ -1350,7 +1490,7 @@ const processNegatedQuery = async (query, negationResult) => {
   // If user is expressing negation, try to redirect to more helpful searches
   const redirectPrompt = `User said: "${query}"
 
-They are expressing that they DON'T have certain medical conditions. 
+They are expressing that they DON'T have certain medical conditions.
 Negated terms: ${negationResult.negatedTerms.join(', ')}
 
 Generate 2-3 alternative search queries that would be more helpful, focusing on:
@@ -1407,10 +1547,10 @@ Return only the alternative queries, one per line:`;
 const enhanceSearchQuery = async (userQuery) => {
   try {
     const prompt = `Extract key medical search terms from: "${userQuery}"
-    
+
 Focus on:
 - Drug names (like belzutifan, sunitinib)
-- Medical conditions 
+- Medical conditions
 - Treatment types
 - Specific medical terms
 
@@ -1495,10 +1635,10 @@ export const hybridSearchResources = async (searchQuery, options = {}) => {
       combined_embedding IS NOT NULL
       AND (
         (1 - (combined_embedding <=> ${JSON.stringify(queryEmbedding)}::vector(1536))) > ${threshold}
-        OR 
+        OR
         (
-          LOWER(name) ~ ${keywordPattern} OR 
-          LOWER(description) ~ ${keywordPattern} OR 
+          LOWER(name) ~ ${keywordPattern} OR
+          LOWER(description) ~ ${keywordPattern} OR
           LOWER(full_text) ~ ${keywordPattern} OR
           LOWER(timestamps) ~ ${keywordPattern}
         )
@@ -1520,7 +1660,7 @@ export const hybridSearchResources = async (searchQuery, options = {}) => {
     }
 
     const results = await db.execute(sql`
-      SELECT 
+      SELECT
         id,
         name,
         description,
@@ -1768,6 +1908,57 @@ export const prepareOrganizationTextForEmbedding = (organization) => {
 };
 
 /**
+ * Prepare text for event embedding
+ * @param {Object} event - Event object
+ * @returns {Object} - Prepared text for embedding
+ */
+export const prepareEventTextForEmbedding = (event) => {
+  const cleanText = (text) => {
+    if (!text) return '';
+    return String(text).replace(/\s+/g, ' ').trim();
+  };
+
+  const formatDate = (value) => {
+    if (!value) return '';
+    const date = value instanceof Date ? value : new Date(value);
+    return Number.isNaN(date.getTime()) ? '' : date.toISOString();
+  };
+
+  const title = cleanText(event.title || 'Untitled Event');
+  const description = cleanText(event.description || '');
+  const location = [
+    event.locationName,
+    event.locationAddress,
+    event.locationCity,
+    event.locationState,
+    event.locationPostal,
+    event.locationCountry,
+  ]
+    .map(cleanText)
+    .filter(Boolean)
+    .join(' ');
+  const timing = [
+    formatDate(event.startDate),
+    formatDate(event.endDate),
+    cleanText(event.timezone),
+  ]
+    .filter(Boolean)
+    .join(' ');
+
+  const combined = [title, description, location, timing]
+    .filter(Boolean)
+    .join(' ');
+
+  return {
+    title,
+    description,
+    location,
+    timing,
+    combined: combined || 'No event content available',
+  };
+};
+
+/**
  * Update embeddings for collections
  * @param {string[]} collectionIds - Array of collection IDs to update (optional)
  * @returns {Promise<void>}
@@ -1804,8 +1995,8 @@ export const updateCollectionEmbeddings = async (collectionIds = null) => {
       );
 
       await db.execute(sql`
-        UPDATE collections 
-        SET 
+        UPDATE collections
+        SET
           name_embedding = ${JSON.stringify(nameEmbedding)}::vector(1536),
           description_embedding = ${JSON.stringify(descriptionEmbedding)}::vector(1536),
           hashtags_embedding = ${JSON.stringify(hashtagsEmbedding)}::vector(1536),
@@ -1861,8 +2052,8 @@ export const updateExternalLinkEmbeddings = async (externalLinkIds = null) => {
       );
 
       await db.execute(sql`
-        UPDATE external_links 
-        SET 
+        UPDATE external_links
+        SET
           name_embedding = ${JSON.stringify(nameEmbedding)}::vector(1536),
           description_embedding = ${JSON.stringify(descriptionEmbedding)}::vector(1536),
           notes_embedding = ${JSON.stringify(notesEmbedding)}::vector(1536),
@@ -1916,8 +2107,8 @@ export const updateOrganizationEmbeddings = async (organizationIds = null) => {
       );
 
       await db.execute(sql`
-        UPDATE organizations 
-        SET 
+        UPDATE organizations
+        SET
           name_embedding = ${JSON.stringify(nameEmbedding)}::vector(1536),
           description_embedding = ${JSON.stringify(descriptionEmbedding)}::vector(1536),
           category_embedding = ${JSON.stringify(categoryEmbedding)}::vector(1536),
@@ -1928,6 +2119,61 @@ export const updateOrganizationEmbeddings = async (organizationIds = null) => {
     }
   } catch (error) {
     console.error('Error updating organization embeddings:', error);
+    throw error;
+  }
+};
+
+/**
+ * Update embeddings for events
+ * @param {string[]} eventIds - Array of event IDs to update (optional)
+ * @returns {Promise<void>}
+ */
+export const updateEventEmbeddings = async (eventIds = null) => {
+  try {
+    let query = db.select().from(events);
+
+    if (eventIds && eventIds.length > 0) {
+      query = query.where(inArray(events.id, eventIds));
+    } else {
+      query = query.where(
+        or(
+          isNull(events.vectorUpdatedAt),
+          gt(events.updatedAt, events.vectorUpdatedAt)
+        )
+      );
+    }
+
+    const items = await query;
+
+    for (const item of items) {
+      const texts = prepareEventTextForEmbedding(item);
+
+      const titleEmbedding = await generateChunkedEmbedding(
+        texts.title || texts.combined
+      );
+      const descriptionEmbedding = await generateChunkedEmbedding(
+        texts.description || texts.combined
+      );
+      const locationEmbedding = await generateChunkedEmbedding(
+        texts.location || texts.combined
+      );
+      const combinedEmbedding = await generateChunkedEmbedding(
+        texts.combined || ''
+      );
+
+      await db.execute(sql`
+        UPDATE events
+        SET
+          title_embedding = ${JSON.stringify(titleEmbedding)}::vector(1536),
+          description_embedding = ${JSON.stringify(descriptionEmbedding)}::vector(1536),
+          location_embedding = ${JSON.stringify(locationEmbedding)}::vector(1536),
+          combined_embedding = ${JSON.stringify(combinedEmbedding)}::vector(1536),
+          vector_updated_at = CURRENT_TIMESTAMP
+        WHERE id = ${item.id}
+      `);
+    }
+  } catch (error) {
+    console.error('Error updating event embeddings:', error);
     throw error;
   }
 };
@@ -1979,7 +2225,7 @@ export const semanticSearchCollections = async (searchQuery, options = {}) => {
     }
 
     const results = await db.execute(sql`
-      SELECT 
+      SELECT
         id,
         name,
         description,
@@ -2082,7 +2328,7 @@ export const semanticSearchExternalLinks = async (
     }
 
     const results = await db.execute(sql`
-      SELECT 
+      SELECT
         id,
         name,
         description,
@@ -2337,8 +2583,8 @@ export const autoUpdateAttachmentEmbedding = async (attachmentId) => {
     );
 
     await db.execute(sql`
-      UPDATE attachments 
-      SET 
+      UPDATE attachments
+      SET
         title_embedding = ${JSON.stringify(titleEmbedding)}::vector(1536),
         description_embedding = ${JSON.stringify(descriptionEmbedding)}::vector(1536),
         combined_embedding = ${JSON.stringify(combinedEmbedding)}::vector(1536),
@@ -2351,6 +2597,59 @@ export const autoUpdateAttachmentEmbedding = async (attachmentId) => {
       error
     );
     // Don't throw - we don't want to break the main attachment operation
+  }
+};
+
+/**
+ * Auto-update embeddings for a single event (call this after create/update)
+ * @param {string} eventId - ID of the event to update
+ * @returns {Promise<void>}
+ */
+export const autoUpdateEventEmbedding = async (eventId) => {
+  try {
+    const event = await db
+      .select()
+      .from(events)
+      .where(eq(events.id, eventId))
+      .limit(1);
+
+    if (event.length === 0) {
+      console.warn(`⚠️ Event not found: ${eventId}`);
+      return;
+    }
+
+    const item = event[0];
+    const texts = prepareEventTextForEmbedding(item);
+
+    const titleEmbedding = await generateChunkedEmbedding(
+      texts.title || texts.combined
+    );
+    const descriptionEmbedding = await generateChunkedEmbedding(
+      texts.description || texts.combined
+    );
+    const locationEmbedding = await generateChunkedEmbedding(
+      texts.location || texts.combined
+    );
+    const combinedEmbedding = await generateChunkedEmbedding(
+      texts.combined || ''
+    );
+
+    await db.execute(sql`
+      UPDATE events
+      SET
+        title_embedding = ${JSON.stringify(titleEmbedding)}::vector(1536),
+        description_embedding = ${JSON.stringify(descriptionEmbedding)}::vector(1536),
+        location_embedding = ${JSON.stringify(locationEmbedding)}::vector(1536),
+        combined_embedding = ${JSON.stringify(combinedEmbedding)}::vector(1536),
+        vector_updated_at = CURRENT_TIMESTAMP
+      WHERE id = ${eventId}
+    `);
+  } catch (error) {
+    console.error(
+      `❌ Error auto-updating embeddings for event ${eventId}:`,
+      error
+    );
+    // Don't throw - we don't want to break the main event operation
   }
 };
 
@@ -2387,8 +2686,8 @@ export const autoUpdateLinkGroupEmbedding = async (linkGroupId) => {
     );
 
     await db.execute(sql`
-      UPDATE link_groups 
-      SET 
+      UPDATE link_groups
+      SET
         name_embedding = ${JSON.stringify(nameEmbedding)}::vector(1536),
         description_embedding = ${JSON.stringify(descriptionEmbedding)}::vector(1536),
         category_embedding = ${JSON.stringify(categoryEmbedding)}::vector(1536),
@@ -2511,8 +2810,8 @@ export const updateNotationEmbeddings = async (notationIds = null) => {
         );
 
         await db.execute(sql`
-          UPDATE collection_external_links_notations 
-          SET 
+          UPDATE collection_external_links_notations
+          SET
             title_embedding = ${JSON.stringify(titleEmbedding)}::vector(1536),
             description_embedding = ${JSON.stringify(descriptionEmbedding)}::vector(1536),
             notes_embedding = ${JSON.stringify(notesEmbedding)}::vector(1536),
@@ -2582,8 +2881,8 @@ export const updateLinkGroupEmbeddings = async (linkGroupIds = null) => {
       );
 
       await db.execute(sql`
-        UPDATE link_groups 
-        SET 
+        UPDATE link_groups
+        SET
           name_embedding = ${JSON.stringify(nameEmbedding)}::vector(1536),
           description_embedding = ${JSON.stringify(descriptionEmbedding)}::vector(1536),
           category_embedding = ${JSON.stringify(categoryEmbedding)}::vector(1536),
@@ -2632,8 +2931,8 @@ export const updateAttachmentEmbeddings = async (attachmentIds = null) => {
       );
 
       await db.execute(sql`
-        UPDATE attachments 
-        SET 
+        UPDATE attachments
+        SET
           title_embedding = ${JSON.stringify(titleEmbedding)}::vector(1536),
           description_embedding = ${JSON.stringify(descriptionEmbedding)}::vector(1536),
           combined_embedding = ${JSON.stringify(combinedEmbedding)}::vector(1536),
@@ -2680,8 +2979,8 @@ export const autoUpdateCollectionEmbedding = async (collectionId) => {
     );
 
     await db.execute(sql`
-      UPDATE collections 
-      SET 
+      UPDATE collections
+      SET
         name_embedding = ${JSON.stringify(nameEmbedding)}::vector(1536),
         description_embedding = ${JSON.stringify(descriptionEmbedding)}::vector(1536),
         hashtags_embedding = ${JSON.stringify(hashtagsEmbedding)}::vector(1536),
@@ -2735,8 +3034,8 @@ export const autoUpdateExternalLinkEmbedding = async (externalLinkId) => {
     );
 
     await db.execute(sql`
-      UPDATE external_links 
-      SET 
+      UPDATE external_links
+      SET
         name_embedding = ${JSON.stringify(nameEmbedding)}::vector(1536),
         description_embedding = ${JSON.stringify(descriptionEmbedding)}::vector(1536),
         notes_embedding = ${JSON.stringify(notesEmbedding)}::vector(1536),
@@ -2818,8 +3117,8 @@ export const autoUpdateNotationEmbedding = async (notationId) => {
     );
 
     await db.execute(sql`
-      UPDATE collection_external_links_notations 
-      SET 
+      UPDATE collection_external_links_notations
+      SET
         title_embedding = ${JSON.stringify(titleEmbedding)}::vector(1536),
         description_embedding = ${JSON.stringify(descriptionEmbedding)}::vector(1536),
         notes_embedding = ${JSON.stringify(notesEmbedding)}::vector(1536),
@@ -2893,7 +3192,7 @@ export const semanticSearchNotations = async (searchText, options = {}) => {
     queryEmbedding || (await generateChunkedEmbedding(searchText));
 
   let baseQuery = sql`
-    SELECT 
+    SELECT
       celn.*,
       cel.collection_id,
       cel.external_link_id,
@@ -3004,7 +3303,7 @@ export const semanticSearchLinkGroups = async (searchText, options = {}) => {
     queryEmbedding || (await generateChunkedEmbedding(searchText));
 
   let baseQuery = sql`
-    SELECT 
+    SELECT
       lg.*,
       r.id as resource_id,
       r.name as resource_title,
@@ -3154,7 +3453,7 @@ export const semanticSearchAttachments = async (searchText, options = {}) => {
     queryEmbedding || (await generateChunkedEmbedding(searchText));
 
   let baseQuery = sql`
-    SELECT 
+    SELECT
       a.*,
       r.id as resource_id,
       r.name as resource_title,
@@ -3700,6 +3999,7 @@ export const startMemoryMonitoring = () => {
       console.error('❌ Memory monitoring error:', error.message);
     }
   }, MEMORY_CONFIG.CLEANUP_INTERVAL_MS);
+  memoryMonitorInterval.unref?.();
 
   console.log(
     `✅ Memory monitoring started (interval: ${MEMORY_CONFIG.CLEANUP_INTERVAL_MS}ms)`
@@ -3745,9 +4045,10 @@ export const getMemoryStats = () => {
 // 🚀 AUTO-START: Start memory monitoring when this module is loaded
 if (process.env.NODE_ENV !== 'test') {
   // Delay startup to allow other systems to initialize
-  setTimeout(() => {
+  const startupTimer = setTimeout(() => {
     startMemoryMonitoring();
   }, 5000);
+  startupTimer.unref?.();
 }
 
 // 🧹 CLEANUP: Stop monitoring on process exit
@@ -3933,7 +4234,6 @@ export const semanticSearchEvents = async (searchText, options = {}) => {
     threshold = 0.3,
     queryEmbedding = null,
     userId = null,
-    userEmail = null,
     tenantIds = null,
   } = options;
 
@@ -3943,27 +4243,40 @@ export const semanticSearchEvents = async (searchText, options = {}) => {
     // 💰 Use pre-generated embedding if provided, otherwise generate new one
     const embedding =
       queryEmbedding || (await generateChunkedEmbedding(searchText));
+    const keywordPattern = `%${searchText}%`;
 
     // Community tenant events are only visible to their creator
     const communityTenantId = process.env.COMMUNITY_TENANT;
-    
-    let whereClause = userId
-      ? sql`
-        (title IS NOT NULL OR description IS NOT NULL)
-        AND (
-          CASE 
-            WHEN tenant_id = ${communityTenantId}::uuid THEN added_by_user_id = ${userId}
-            ELSE (visibility = 'public' OR added_by_user_id = ${userId})
-          END
-        )
-      `
-      : sql`
-        (title IS NOT NULL OR description IS NOT NULL)
-        AND tenant_id != ${communityTenantId}::uuid
-        AND visibility = 'public'
-      `;
 
-    // Filter by tenant(s) if provided
+    let whereClause;
+    if (communityTenantId) {
+      whereClause = userId
+        ? sql`
+          (title IS NOT NULL OR description IS NOT NULL)
+          AND (
+            CASE
+              WHEN tenant_id = ${communityTenantId}::uuid THEN added_by_user_id = ${userId}
+              ELSE (visibility = 'public' OR added_by_user_id = ${userId})
+            END
+          )
+        `
+        : sql`
+          (title IS NOT NULL OR description IS NOT NULL)
+          AND tenant_id != ${communityTenantId}::uuid
+          AND visibility = 'public'
+        `;
+    } else {
+      whereClause = userId
+        ? sql`
+          (title IS NOT NULL OR description IS NOT NULL)
+          AND (visibility = 'public' OR added_by_user_id = ${userId})
+        `
+        : sql`
+          (title IS NOT NULL OR description IS NOT NULL)
+          AND visibility = 'public'
+        `;
+    }
+
     if (tenantIds && tenantIds.length > 0) {
       whereClause = sql`${whereClause} AND tenant_id = ANY(ARRAY[${sql.join(
         tenantIds.map((id) => sql`${id}::uuid`),
@@ -3971,9 +4284,105 @@ export const semanticSearchEvents = async (searchText, options = {}) => {
       )}])`;
     }
 
-    // For now, do text-based search since events don't have embeddings yet
+    const textSearchVector = sql`to_tsvector(
+      'english',
+      concat_ws(' ', title, description, location_name, location_city, location_state)
+    )`;
+    const textSearchQuery = sql`plainto_tsquery('english', ${searchText})`;
+
     const results = await db.execute(sql`
-      SELECT 
+      WITH visible_events AS (
+        SELECT
+          id,
+          title,
+          description,
+          start_date,
+          end_date,
+          location_name,
+          location_city,
+          location_state,
+          registration_link,
+          tenant_id,
+          created_at,
+          updated_at,
+          visibility,
+          added_by_user_id,
+          combined_embedding
+        FROM events
+        WHERE ${whereClause}
+      ),
+      semantic_matches AS (
+        SELECT
+          id,
+          title,
+          description,
+          start_date,
+          end_date,
+          location_name,
+          location_city,
+          location_state,
+          registration_link,
+          tenant_id,
+          created_at,
+          updated_at,
+          visibility,
+          added_by_user_id,
+          (1 - (combined_embedding <=> ${JSON.stringify(embedding)}::vector(1536))) AS semantic_score,
+          0.0::float AS keyword_score,
+          'semantic' AS matched_via
+        FROM visible_events
+        WHERE combined_embedding IS NOT NULL
+          AND (1 - (combined_embedding <=> ${JSON.stringify(embedding)}::vector(1536))) > ${threshold}
+      ),
+      keyword_matches AS (
+        SELECT
+          id,
+          title,
+          description,
+          start_date,
+          end_date,
+          location_name,
+          location_city,
+          location_state,
+          registration_link,
+          tenant_id,
+          created_at,
+          updated_at,
+          visibility,
+          added_by_user_id,
+          0.0::float AS semantic_score,
+          CASE
+            WHEN title ILIKE ${keywordPattern} THEN 0.95
+            WHEN description ILIKE ${keywordPattern} THEN 0.8
+            WHEN location_name ILIKE ${keywordPattern}
+              OR location_city ILIKE ${keywordPattern}
+              OR location_state ILIKE ${keywordPattern} THEN 0.7
+            ELSE GREATEST(ts_rank_cd(${textSearchVector}, ${textSearchQuery}), 0.45)
+          END AS keyword_score,
+          'keyword' AS matched_via
+        FROM visible_events
+        WHERE title ILIKE ${keywordPattern}
+          OR description ILIKE ${keywordPattern}
+          OR location_name ILIKE ${keywordPattern}
+          OR location_city ILIKE ${keywordPattern}
+          OR location_state ILIKE ${keywordPattern}
+          OR ${textSearchVector} @@ ${textSearchQuery}
+      ),
+      ranked_matches AS (
+        SELECT
+          *,
+          GREATEST(semantic_score, keyword_score) AS similarity_score,
+          ROW_NUMBER() OVER (
+            PARTITION BY id
+            ORDER BY GREATEST(semantic_score, keyword_score) DESC
+          ) AS match_rank
+        FROM (
+          SELECT * FROM semantic_matches
+          UNION ALL
+          SELECT * FROM keyword_matches
+        ) matches
+      )
+      SELECT
         id,
         title,
         description,
@@ -3988,24 +4397,21 @@ export const semanticSearchEvents = async (searchText, options = {}) => {
         updated_at,
         visibility,
         added_by_user_id,
-        -- Calculate similarity based on text match for now
-        CASE 
-          WHEN title ILIKE ${`%${searchText}%`} THEN 0.9
-          WHEN description ILIKE ${`%${searchText}%`} THEN 0.7
-          ELSE 0.5
-        END as similarity_score
-      FROM events
-      WHERE ${whereClause}
-        AND (title ILIKE ${`%${searchText}%`} OR description ILIKE ${`%${searchText}%`})
+        semantic_score,
+        keyword_score,
+        similarity_score,
+        matched_via
+      FROM ranked_matches
+      WHERE match_rank = 1
       ORDER BY similarity_score DESC
       LIMIT ${limit}
     `);
 
-    console.log(
-      `✅ Found ${results.rows.length} event results for "${searchText}"`
-    );
+    const rows = results.rows;
 
-    return results.rows.map((row) => ({
+    console.log(`✅ Found ${rows.length} event results for "${searchText}"`);
+
+    return rows.map((row) => ({
       ...row,
       similarity: parseFloat(row.similarity_score).toFixed(4),
       search_type: 'event',
@@ -4041,7 +4447,7 @@ export const semanticSearchOrganizations = async (searchText, options = {}) => {
     // Build visibility condition for Community tenant
     const communityVisibilityCondition = userId
       ? sql`AND (
-          CASE 
+          CASE
             WHEN tenant_id = ${communityTenantId}::uuid THEN user_id = ${userId}
             ELSE true
           END
@@ -4068,8 +4474,8 @@ export const semanticSearchOrganizations = async (searchText, options = {}) => {
 
     // Let's also do a simple keyword search to see if the organization exists
     const keywordSearch = await db.execute(sql`
-      SELECT id, name, acronym, description, 
-             CASE 
+      SELECT id, name, acronym, description,
+             CASE
                WHEN combined_embedding IS NOT NULL THEN 'HAS_EMBEDDING'
                ELSE 'NO_EMBEDDING'
              END as embedding_status
@@ -4112,7 +4518,7 @@ export const semanticSearchOrganizations = async (searchText, options = {}) => {
     whereClause = sql`${whereClause} ${communityVisibilityCondition}`;
 
     const results = await db.execute(sql`
-      SELECT 
+      SELECT
         id,
         name,
         acronym,
@@ -4150,7 +4556,7 @@ export const semanticSearchOrganizations = async (searchText, options = {}) => {
       );
 
       const lowerThresholdResults = await db.execute(sql`
-        SELECT 
+        SELECT
           id,
           name,
           acronym,
@@ -4538,8 +4944,8 @@ export const autoUpdateOrganizationEmbedding = async (organizationId) => {
     );
 
     await db.execute(sql`
-      UPDATE organizations 
-      SET 
+      UPDATE organizations
+      SET
         name_embedding = ${JSON.stringify(nameEmbedding)}::vector(1536),
         description_embedding = ${JSON.stringify(descriptionEmbedding)}::vector(1536),
         category_embedding = ${JSON.stringify(categoryEmbedding)}::vector(1536),
@@ -4631,7 +5037,7 @@ export const keywordSearchOrganizations = async (searchText, options = {}) => {
 
   try {
     const results = await db.execute(sql`
-      SELECT 
+      SELECT
         id,
         name,
         acronym,
@@ -4647,7 +5053,7 @@ export const keywordSearchOrganizations = async (searchText, options = {}) => {
         tenant_id,
         created_at,
         updated_at,
-        CASE 
+        CASE
           WHEN LOWER(name) = LOWER(${searchText}) THEN 1.0
           WHEN LOWER(acronym) = LOWER(${searchText}) THEN 0.95
           WHEN LOWER(name) LIKE LOWER(${'%' + searchText + '%'}) THEN 0.8

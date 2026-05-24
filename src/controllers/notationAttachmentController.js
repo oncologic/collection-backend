@@ -9,7 +9,6 @@ import {
 import { createAttachmentService } from '../services/attachmentService.js';
 import { s3Uploader } from '../utils/s3Uploader.js';
 import { generatePresignedUrl } from '../utils/s3.js';
-import { generatePresignedCloudFrontUrl } from '../utils/cloudFrontSigner.js';
 import { v4 as uuidv4 } from 'uuid';
 
 export const notationAttachmentController = {
@@ -186,9 +185,7 @@ export const notationAttachmentController = {
       const hydratedAttachments = await Promise.all(
         attachments.map(async ({ attachment, notationAttachment }) => {
           const presignedUrl = attachment.imageKey
-            ? process.env.CLOUDFRONT_DOMAIN
-              ? generatePresignedCloudFrontUrl(attachment.imageKey, 86400)
-              : await generatePresignedUrl(attachment.imageKey, 86400)
+            ? await generatePresignedUrl(attachment.imageKey, 86400)
             : null;
 
           return {

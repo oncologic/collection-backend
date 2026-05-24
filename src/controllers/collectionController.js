@@ -68,7 +68,7 @@ import { db } from '../db/index.js';
 import { and, eq } from 'drizzle-orm';
 import { collectionCollaborators } from '../models/collectionCollaborators.js';
 import { collectionExternalLinkCollaborators } from '../models/collectionExternalLinkCollaborators.js';
-import { collectionExternalLinks } from '../models/external_links.js';
+import { collectionExternalLinks, externalLinks } from '../models/external_links.js';
 import { sendCollaborationInviteEmail } from '../services/emailService.js';
 import { users } from '../models/users.js';
 import { subscriptionService } from '../services/subscriptionService.js';
@@ -810,6 +810,68 @@ export const collectionController = {
       res.status(500).json({
         error: 'Failed to update external link in collection',
       });
+    }
+  },
+
+  async updateExternalLinkWhiteboard(req, res) {
+    try {
+      const { externalLinkId } = req.params;
+      const userId = req.auth.dbUserId;
+      const tenantIds = req.tenantIds;
+
+      const externalLink = await getExternalLinkByIdService(
+        externalLinkId,
+        userId,
+        tenantIds
+      );
+
+      if (!externalLink) {
+        return res.status(404).json({ message: 'External link not found' });
+      }
+
+      let canEdit = externalLink.addedByUserId === userId;
+
+      if (!canEdit) {
+        const collaboratorRows = await db
+          .select({ id: collectionExternalLinkCollaborators.id })
+          .from(collectionExternalLinks)
+          .innerJoin(
+            collectionExternalLinkCollaborators,
+            and(
+              eq(
+                collectionExternalLinkCollaborators.collectionExternalLinkId,
+                collectionExternalLinks.id
+              ),
+              eq(collectionExternalLinkCollaborators.userId, userId)
+            )
+          )
+          .where(eq(collectionExternalLinks.externalLinkId, externalLinkId))
+          .limit(1);
+
+        canEdit = collaboratorRows.length > 0;
+      }
+
+      if (!canEdit) {
+        return res
+          .status(403)
+          .json({ message: 'You do not have permission to edit this link' });
+      }
+
+      const [updatedExternalLink] = await db
+        .update(externalLinks)
+        .set({
+          whiteboardData: req.body.whiteboardData ?? null,
+          updatedAt: new Date(),
+        })
+        .where(eq(externalLinks.id, externalLinkId))
+        .returning();
+
+      return res.json(snakeToCamelCase(updatedExternalLink));
+    } catch (error) {
+      console.error('Error in updateExternalLinkWhiteboard:', error);
+      return res
+        .status(500)
+        .json({ message: 'Failed to update external link whiteboard' });
     }
   },
 

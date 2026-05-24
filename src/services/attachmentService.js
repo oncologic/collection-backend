@@ -124,6 +124,16 @@ export const findAttachmentByUserById = async (id, userId) => {
   return result.rows[0] || null;
 };
 
+export const findAttachmentByImageKey = async (imageKey) => {
+  const [attachment] = await db
+    .select()
+    .from(attachments)
+    .where(eq(attachments.imageKey, imageKey))
+    .limit(1);
+
+  return attachment || null;
+};
+
 export async function getAttachmentsByIds(
   attachmentIds,
   userId = null,
@@ -892,6 +902,7 @@ export const attachmentService = {
   createAttachmentService,
   deleteAttachmentService,
   findAttachmentByUserById,
+  findAttachmentByImageKey,
   getAttachmentsByIds,
   searchAttachments,
   addExistingAttachmentToExternalLink,

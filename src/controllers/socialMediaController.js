@@ -84,14 +84,6 @@ export const socialMediaController = {
       const { name, icon, urlPattern, existingPlatformId } = req.body;
       const tenantId = req.tenantIds[0]; // Using the first tenant ID
 
-      if (!canManagePlatformsInTenant(req, req.tenantIds || [])) {
-        return res.status(403).json({
-          error: 'Forbidden',
-          message:
-            'Only tenant admins or superusers can manage social media platforms',
-        });
-      }
-
       if (!tenantId) {
         return res.status(400).json({ error: 'A tenant is required' });
       }

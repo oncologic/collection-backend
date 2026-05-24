@@ -19,16 +19,68 @@ import {
   socialMediaPlatforms,
 } from '../models/socialMedia.js';
 
+const OPTIONAL_ORGANIZATION_FIELDS = [
+  'acronym',
+  'description',
+  'website',
+  'email',
+  'phone',
+  'address',
+  'city',
+  'state',
+  'postal',
+  'country',
+  'category',
+  'imageUrl',
+  'imageKey',
+  'primaryContactName',
+  'primaryContactEmail',
+  'primaryContactPhone',
+  'clerkOrganizationId',
+];
+
+function validationError(message) {
+  const error = new Error(message);
+  error.statusCode = 400;
+  return error;
+}
+
+function normalizeBusinessUnitData(data, { requireName = false } = {}) {
+  const normalized = { ...data };
+
+  if (typeof normalized.name === 'string') {
+    normalized.name = normalized.name.trim();
+  }
+
+  if (requireName && !normalized.name) {
+    throw validationError('Business Unit name is required');
+  }
+
+  if ('name' in normalized && normalized.name !== undefined && !normalized.name) {
+    throw validationError('Business Unit name cannot be blank');
+  }
+
+  OPTIONAL_ORGANIZATION_FIELDS.forEach((field) => {
+    if (normalized[field] === '' || normalized[field] === 'null') {
+      normalized[field] = null;
+    }
+  });
+
+  return normalized;
+}
+
 export async function createOrganizationService(data) {
+  const normalizedData = normalizeBusinessUnitData(data, { requireName: true });
+
   try {
     return await db.transaction(async (tx) => {
       const [organization] = await tx
         .insert(organizations)
-        .values(data)
+        .values(normalizedData)
         .returning();
 
-      if (data.tags) {
-        const tagIds = data.tags.split(',').map((id) => parseInt(id));
+      if (normalizedData.tags) {
+        const tagIds = normalizedData.tags.split(',').map((id) => parseInt(id));
         await tx.insert(organizationTags).values(
           tagIds.map((tagId) => ({
             organizationId: organization.id,
@@ -43,7 +95,7 @@ export async function createOrganizationService(data) {
         autoUpdateOrganizationEmbedding(organization.id).catch(
           (embeddingError) => {
             console.warn(
-              'Failed to update organization embeddings:',
+              'Failed to update business unit embeddings:',
               embeddingError
             );
           }
@@ -53,8 +105,8 @@ export async function createOrganizationService(data) {
       return organization;
     });
   } catch (error) {
-    console.error('Error creating organization:', error);
-    throw new Error('Failed to create organization');
+    console.error('Error creating business unit:', error);
+    throw new Error('Failed to create business unit');
   }
 }
 
@@ -64,7 +116,7 @@ export async function deleteOrganizationService(organizationId) {
     const relatedItems = await checkOrganizationDependencies(organizationId);
 
     if (relatedItems.hasRelatedItems) {
-      const error = new Error('Cannot delete organization with related items');
+      const error = new Error('Cannot delete business unit with related items');
       error.statusCode = 409;
       error.relatedItems = relatedItems;
       throw error;
@@ -76,19 +128,19 @@ export async function deleteOrganizationService(organizationId) {
         .delete(organizationTags)
         .where(eq(organizationTags.organizationId, organizationId));
 
-      // Delete organization members
+      // Delete business unit members
       await tx
         .delete(organizationMembers)
         .where(eq(organizationMembers.organizationId, organizationId));
 
-      // Then delete the organization
+      // Then delete the business unit
       const [organization] = await tx
         .delete(organizations)
         .where(and(eq(organizations.id, organizationId)))
         .returning();
 
       if (!organization) {
-        throw new Error('Organization not found');
+        throw new Error('Business Unit not found');
       }
 
       return { organization, deletedTags };
@@ -163,6 +215,8 @@ export async function checkOrganizationDependencies(organizationId) {
 }
 
 export async function updateOrganizationService(organizationId, data) {
+  const normalizedData = normalizeBusinessUnitData(data);
+
   try {
     return await db.transaction(async (tx) => {
       // Extract tags and remove non-column fields
@@ -174,7 +228,7 @@ export async function updateOrganizationService(organizationId, data) {
         logoUrl,
         imageUrl,
         ...organizationData
-      } = data;
+      } = normalizedData;
 
       // Filter out any non-column fields and undefined values
       const validFields = {};
@@ -270,7 +324,7 @@ export async function updateOrganizationService(organizationId, data) {
         autoUpdateOrganizationEmbedding(organization.id).catch(
           (embeddingError) => {
             console.warn(
-              'Failed to update organization embeddings:',
+              'Failed to update business unit embeddings:',
               embeddingError
             );
           }
@@ -420,8 +474,8 @@ export async function getAllOrganizations(tenantIds, userId = null) {
 
     return organizationsWithTagsAndSocialMedia;
   } catch (error) {
-    console.error('Error fetching organizations:', error);
-    throw new Error('Failed to fetch organizations');
+    console.error('Error fetching business units:', error);
+    throw new Error('Failed to fetch business units');
   }
 }
 
@@ -503,8 +557,8 @@ export async function getOrganizationById(id, tenantIds, userId = null) {
       tags: tagsData.map((t) => ({ id: t.tagId, name: t.tagName })),
     };
   } catch (error) {
-    console.error('Error fetching organization by ID:', error);
-    throw new Error(`Failed to fetch organization with ID: ${id}`);
+    console.error('Error fetching business unit by ID:', error);
+    throw new Error(`Failed to fetch business unit with ID: ${id}`);
   }
 }
 
@@ -525,8 +579,8 @@ export async function getOrganizationMembersService(organizationId) {
       .where(eq(organizationMembers.organizationId, organizationId));
     return members;
   } catch (error) {
-    console.error('Error fetching organization members:', error);
-    throw new Error('Failed to fetch organization members');
+    console.error('Error fetching business unit members:', error);
+    throw new Error('Failed to fetch business unit members');
   }
 }
 
@@ -592,8 +646,8 @@ export async function getOrganizationsByIdsService(
     });
     return listOfOrganizations;
   } catch (error) {
-    console.error('Error fetching organizations by IDs:', error);
-    throw new Error('Failed to fetch organizations by IDs');
+    console.error('Error fetching business units by IDs:', error);
+    throw new Error('Failed to fetch business units by IDs');
   }
 }
 
@@ -636,8 +690,8 @@ export async function subscribeToOrganization(userId, organizationId, role) {
 
     return subscription;
   } catch (error) {
-    console.error('Error subscribing to organization:', error);
-    throw new Error('Failed to subscribe to organization');
+    console.error('Error subscribing to business unit:', error);
+    throw new Error('Failed to subscribe to business unit');
   }
 }
 
@@ -656,7 +710,7 @@ export async function unsubscribeFromOrganization(userId, organizationId) {
 
     return unsubscribed;
   } catch (error) {
-    console.error('Error unsubscribing from organization:', error);
+    console.error('Error unsubscribing from business unit:', error);
     throw error;
   }
 }
@@ -704,8 +758,8 @@ export async function getUserSubscribedOrganizations(userId, tenantIds) {
         : null,
     }));
   } catch (error) {
-    console.error('Error fetching user subscribed organizations:', error);
-    throw new Error('Failed to fetch subscribed organizations');
+    console.error('Error fetching user subscribed business units:', error);
+    throw new Error('Failed to fetch subscribed business units');
   }
 }
 
@@ -721,7 +775,7 @@ export async function getAllOrganizationMembersService() {
         firstName: users.firstName,
         lastName: users.lastName,
         email: users.email,
-        // Organization details
+        // Business unit details
         organizationName: organizations.name,
         organizationDescription: organizations.description,
         organizationImageKey: organizations.imageKey,
@@ -741,7 +795,7 @@ export async function getAllOrganizationMembersService() {
         : null,
     }));
   } catch (error) {
-    console.error('Error fetching all organization members:', error);
-    throw new Error('Failed to fetch all organization members');
+    console.error('Error fetching all business unit members:', error);
+    throw new Error('Failed to fetch all business unit members');
   }
 }

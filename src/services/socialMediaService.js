@@ -11,7 +11,8 @@ import { collections } from '../models/collections.js';
 import { generatePresignedCloudFrontUrl } from '../utils/cloudFrontSigner.js';
 import { snakeToCamelCase } from '../utils/general.js';
 
-const normalizePlatformName = (name = '') => name.trim().toLowerCase();
+const normalizePlatformName = (name = '') =>
+  String(name).trim().replace(/\s+/g, ' ').toLowerCase();
 
 const getPlatformPreferenceRank = (platform, preferredTenantIds = []) => {
   if (platform.tenantId === null || platform.tenantId === undefined) {
@@ -845,6 +846,25 @@ export const getAssociationsBySocialMediaAccountService = async (
 // Create association
 export const createAssociationService = async (data) => {
   try {
+    const [existingAssociation] = await db
+      .select()
+      .from(socialMediaAssociations)
+      .where(
+        and(
+          eq(
+            socialMediaAssociations.socialMediaAccountId,
+            data.socialMediaAccountId
+          ),
+          eq(socialMediaAssociations.associatedId, data.associatedId),
+          eq(socialMediaAssociations.associatedType, data.associatedType)
+        )
+      )
+      .limit(1);
+
+    if (existingAssociation) {
+      return snakeToCamelCase(existingAssociation);
+    }
+
     const [association] = await db
       .insert(socialMediaAssociations)
       .values({

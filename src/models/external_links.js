@@ -50,7 +50,6 @@ export const externalLinks = pgTable('external_links', {
   startTime: time('start_time'),
   endTime: time('end_time'),
   timezone: varchar('timezone', { length: 100 }),
-  isGoogleCalendarEvent: boolean('is_google_calendar_event').default(false),
   fullText: text('full_text'),
   tenantId: uuid('tenant_id').references(() => tenants.id),
   publicJsonEnabled: boolean('public_json_enabled').notNull().default(false),

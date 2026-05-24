@@ -1,8 +1,7 @@
-import { generatePresignedCloudFrontUrl } from './cloudFrontSigner.js';
 import { generatePresignedUrl } from './s3.js';
 
 /**
- * Extracts imageKey from a presigned URL (S3 or CloudFront)
+ * Extracts imageKey from a signed storage URL.
  * @param {string} url - The presigned URL
  * @returns {string|null} - The imageKey if found, null otherwise
  */
@@ -18,7 +17,7 @@ function extractImageKeyFromUrl(url) {
       }
     }
 
-    // Check if it's a CloudFront URL
+    // Check if it's a CDN URL whose path is the storage key.
     const cloudFrontDomain = process.env.CLOUDFRONT_DOMAIN;
     if (cloudFrontDomain && url.includes(cloudFrontDomain)) {
       // Extract the path after the domain
@@ -27,6 +26,19 @@ function extractImageKeyFromUrl(url) {
       // Remove leading slash and extract key
       const key = pathname.startsWith('/') ? pathname.slice(1) : pathname;
       return decodeURIComponent(key);
+    }
+
+    // Check if it's an Azure Blob Storage URL.
+    if (url.includes('.blob.core.windows.net')) {
+      const urlObj = new URL(url);
+      const pathParts = urlObj.pathname.split('/').filter(Boolean);
+      const containerName = process.env.AZURE_STORAGE_CONTAINER_NAME;
+      const keyParts =
+        containerName && pathParts[0] === containerName
+          ? pathParts.slice(1)
+          : pathParts.slice(1);
+
+      return keyParts.length ? decodeURIComponent(keyParts.join('/')) : null;
     }
 
     // Check if it's an S3 presigned URL
@@ -55,7 +67,9 @@ function extractImageKeyFromUrl(url) {
 }
 
 function extractImageKeyFromTag(fullImgTag) {
-  const dataImageKeyMatch = fullImgTag.match(/data-image-key=["']([^"']+)["']/i);
+  const dataImageKeyMatch = fullImgTag.match(
+    /data-image-key=["']([^"']+)["']/i
+  );
   if (dataImageKeyMatch?.[1]) {
     return dataImageKeyMatch[1];
   }
@@ -84,10 +98,8 @@ export async function refreshImageUrlsInHtml(
       typeof options === 'number'
         ? { expiresInSeconds: options }
         : options || {};
-    const {
-      expiresInSeconds = 86400,
-      accessMode = 'proxy',
-    } = normalizedOptions;
+    const { expiresInSeconds = 86400, accessMode = 'proxy' } =
+      normalizedOptions;
 
     // Create a map of imageKey to attachment for quick lookup
     const attachmentMap = new Map();
@@ -114,8 +126,8 @@ export async function refreshImageUrlsInHtml(
       }
 
       // Extract imageKey from URL
-      let imageKey = extractImageKeyFromTag(fullImgTag) ||
-        extractImageKeyFromUrl(imageUrl);
+      let imageKey =
+        extractImageKeyFromTag(fullImgTag) || extractImageKeyFromUrl(imageUrl);
 
       // If we can't extract from URL, try to find it in attachments
       if (!imageKey) {
@@ -143,17 +155,10 @@ export async function refreshImageUrlsInHtml(
           let replacementUrl;
 
           if (accessMode === 'signed') {
-            if (process.env.CLOUDFRONT_DOMAIN) {
-              replacementUrl = generatePresignedCloudFrontUrl(
-                imageKey,
-                expiresInSeconds
-              );
-            } else {
-              replacementUrl = await generatePresignedUrl(
-                imageKey,
-                expiresInSeconds
-              );
-            }
+            replacementUrl = await generatePresignedUrl(
+              imageKey,
+              expiresInSeconds
+            );
           } else {
             const baseUrl =
               process.env.NEXT_PUBLIC_API_URL || process.env.FRONTEND_URL || '';
@@ -203,12 +208,10 @@ export async function refreshImageUrlsInHtml(
  */
 export async function getNotationAttachmentImageKeys(notationId) {
   try {
-    const { getNotationAttachments } = await import(
-      '../services/notationAttachmentService.js'
-    );
-    const { getAttachmentsByIds } = await import(
-      '../services/attachmentService.js'
-    );
+    const { getNotationAttachments } =
+      await import('../services/notationAttachmentService.js');
+    const { getAttachmentsByIds } =
+      await import('../services/attachmentService.js');
 
     // Get notation attachments
     const notationAttachments = await getNotationAttachments(notationId, null);

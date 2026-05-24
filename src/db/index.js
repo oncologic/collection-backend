@@ -1,6 +1,9 @@
 import { drizzle } from 'drizzle-orm/node-postgres';
 import pkg from 'pg';
-import 'dotenv/config';
+import dotenv from 'dotenv';
+
+dotenv.config({ path: '.env.local' });
+dotenv.config();
 
 const { Pool } = pkg;
 
@@ -27,17 +30,20 @@ const pool = new Pool(
 
 const connectionType = process.env.DATABASE_URL ? 'Heroku' : 'Local';
 
-pool
-  .connect()
-  .then(() => {
-    console.info(`✅ Database (${connectionType}) connected successfully`);
-  })
-  .catch((err) => {
-    console.error(
-      `❌ Database (${connectionType}) connection error:`,
-      err.message
-    );
-  });
+if (process.env.NODE_ENV !== 'test') {
+  pool
+    .connect()
+    .then((client) => {
+      client.release();
+      console.info(`✅ Database (${connectionType}) connected successfully`);
+    })
+    .catch((err) => {
+      console.error(
+        `❌ Database (${connectionType}) connection error:`,
+        err.message
+      );
+    });
+}
 
 export const db = drizzle(pool);
 export { pool };

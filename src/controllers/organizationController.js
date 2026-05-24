@@ -36,7 +36,7 @@ export const organizationController = {
       if (!authorizedTenantIds.includes(requestedTenantId)) {
         return res.status(403).json({
           error:
-            'You are not authorized to create organizations in the requested tenant',
+            'You are not authorized to create business units in the requested tenant',
         });
       }
       organizationData.tenantId = requestedTenantId;
@@ -49,8 +49,8 @@ export const organizationController = {
       });
     }
 
-    // Check if user is trying to create organization in kidney tenant
-    // Allow both admins and advocates to create organizations
+    // Check if user is trying to create a business unit in kidney tenant
+    // Allow both admins and advocates to create business units
     const KIDNEY_TENANT_ID = process.env.KIDNEY_TENANT_ID;
     if (
       organizationData.tenantId === KIDNEY_TENANT_ID &&
@@ -59,7 +59,7 @@ export const organizationController = {
     ) {
       return res.status(403).json({
         error:
-          'Only administrators and advocates can create organizations in the kidney cancer tenant',
+          'Only administrators and advocates can create business units in the kidney cancer tenant',
       });
     }
 
@@ -86,28 +86,28 @@ export const organizationController = {
             mimeType === 'image/jpeg'
               ? 'jpg'
               : req.file.originalname.split('.').pop();
-          const key = `organizations/${uuidv4()}.${fileExtension}`;
+          const key = `business-units/${uuidv4()}.${fileExtension}`;
 
           // Upload to S3
           await s3Uploader(buffer, key, mimeType);
 
-          // Add the image key and URL to organization data
+          // Add the image key and URL to business unit data
           organizationData.imageKey = key;
         } catch (error) {
-          console.error('Error uploading organization image:', error);
-          throw new Error('Failed to upload organization image');
+          console.error('Error uploading business unit image:', error);
+          throw new Error('Failed to upload business unit image');
         } finally {
           // Clean up the buffer
           req.file.buffer = null;
         }
       }
 
-      // Create the organization with the image data
+      // Create the business unit with the image data
       const organization = await createOrganizationService(organizationData);
 
       return res.status(201).json(organization);
     } catch (error) {
-      console.error('Error creating organization:', error);
+      console.error('Error creating business unit:', error);
 
       // If there was an error and we uploaded an image, try to clean it up
       if (organizationData.imageKey) {
@@ -115,13 +115,16 @@ export const organizationController = {
           await s3Delete(organizationData.imageKey);
         } catch (deleteError) {
           console.error(
-            'Error cleaning up image after failed organization creation:',
+            'Error cleaning up image after failed business unit creation:',
             deleteError
           );
         }
       }
 
-      return res.status(500).json({ error: 'Error creating organization' });
+      const statusCode = error.statusCode || 500;
+      return res.status(statusCode).json({
+        error: statusCode === 400 ? error.message : 'Error creating business unit',
+      });
     }
   },
 
@@ -130,53 +133,53 @@ export const organizationController = {
       const { id } = req.params;
       const tenantIds = req.tenantIds;
       const userId = req.auth?.dbUserId || null;
-      // Get the organization details before deletion to access imageKey
+      // Get the business unit details before deletion to access imageKey
       const organization = await getOrganizationById(id, tenantIds, userId);
       if (!organization) {
-        return res.status(404).json({ error: 'Organization not found' });
+        return res.status(404).json({ error: 'Business Unit not found' });
       }
 
-      // Check if user is admin or the creator of the organization
+      // Check if user is admin or the creator of the business unit
       const user = await getUserByIdService(req.auth.dbUserId);
       const isAdmin = user.userRoles.some((role) => role.value === 'admin');
       const isCreator = req.auth.dbUserId === organization.userId;
 
       if (!isAdmin && !isCreator) {
         return res.status(403).json({
-          error: 'You are not authorized to delete this organization',
+          error: 'You are not authorized to delete this business unit',
         });
       }
 
-      // If organization has an image, delete it from S3
+      // If business unit has an image, delete it from S3
       if (organization.imageKey) {
         try {
           await s3Delete(organization.imageKey);
         } catch (deleteError) {
           console.error(
-            'Error deleting organization image from S3:',
+            'Error deleting business unit image from S3:',
             deleteError
           );
-          // Continue with organization deletion even if image deletion fails
+          // Continue with business unit deletion even if image deletion fails
         }
       }
 
-      // Delete the organization from the database
+      // Delete the business unit from the database
       await deleteOrganizationService(id);
 
       return res
         .status(200)
-        .json({ message: 'Organization deleted successfully' });
+        .json({ message: 'Business Unit deleted successfully' });
     } catch (error) {
       // Handle specific error for related items
       if (error.statusCode === 409 && error.relatedItems) {
         return res.status(409).json({
-          error: 'Cannot delete organization with related items',
-          message: `This organization has ${error.relatedItems.details.join(', ')} associated with it. Please delete or reassign these items before deleting the organization.`,
+          error: 'Cannot delete business unit with related items',
+          message: `This business unit has ${error.relatedItems.details.join(', ')} associated with it. Please delete or reassign these items before deleting the business unit.`,
           relatedItems: error.relatedItems,
         });
       }
 
-      return res.status(500).json({ error: 'Error deleting organization' });
+      return res.status(500).json({ error: 'Error deleting business unit' });
     }
   },
 
@@ -186,7 +189,7 @@ export const organizationController = {
       const tenantIds = req.tenantIds;
       const userId = req.auth.dbUserId;
 
-      // First fetch the existing organization
+      // First fetch the existing business unit
       const existingOrganization = await getOrganizationById(
         req.params.id,
         tenantIds,
@@ -194,7 +197,7 @@ export const organizationController = {
       );
 
       if (!existingOrganization) {
-        return res.status(404).json({ error: 'Organization not found' });
+        return res.status(404).json({ error: 'Business Unit not found' });
       }
 
       // If there's a file in the request, upload it to S3
@@ -223,7 +226,7 @@ export const organizationController = {
             mimeType === 'image/jpeg'
               ? 'jpg'
               : req.file.originalname.split('.').pop();
-          const key = `organizations/${uuidv4()}.${fileExtension}`;
+          const key = `business-units/${uuidv4()}.${fileExtension}`;
 
           // Upload to S3
           await s3Uploader(buffer, key, mimeType);
@@ -238,8 +241,8 @@ export const organizationController = {
 
           imageKey = key;
         } catch (error) {
-          console.error('Error uploading organization image:', error);
-          throw new Error('Failed to upload organization image');
+          console.error('Error uploading business unit image:', error);
+          throw new Error('Failed to upload business unit image');
         } finally {
           // Clean up the buffer
           req.file.buffer = null;
@@ -254,7 +257,7 @@ export const organizationController = {
         });
       }
 
-      // Add the image key to the organization data if a new image was uploaded
+      // Add the image key to the business unit data if a new image was uploaded
       const organizationData = {
         ...req.body,
         ...(imageKey && { imageKey }),
@@ -288,8 +291,11 @@ export const organizationController = {
 
       res.status(200).json(responseData);
     } catch (error) {
-      console.error('Error updating organization:', error);
-      res.status(500).json({ error: 'Failed to update organization' });
+      console.error('Error updating business unit:', error);
+      const statusCode = error.statusCode || 500;
+      res.status(statusCode).json({
+        error: statusCode === 400 ? error.message : 'Failed to update business unit',
+      });
     }
   },
 
@@ -310,8 +316,8 @@ export const organizationController = {
 
       res.status(200).json(organizationsWithUrls);
     } catch (error) {
-      console.error('Error fetching organizations:', error);
-      res.status(500).json({ error: 'Failed to fetch organizations' });
+      console.error('Error fetching business units:', error);
+      res.status(500).json({ error: 'Failed to fetch business units' });
     }
   },
 
@@ -325,9 +331,9 @@ export const organizationController = {
         userId
       );
       if (!organization) {
-        return res.status(403).json({ error: 'Organization not found' });
+        return res.status(403).json({ error: 'Business Unit not found' });
       }
-      // Add logo URL to the organization
+      // Add logo URL to the business unit
       const organizationWithUrl = {
         ...organization,
         logoUrl: organization.imageKey
@@ -337,8 +343,8 @@ export const organizationController = {
 
       res.status(200).json(organizationWithUrl);
     } catch (error) {
-      console.error('Error fetching organization:', error);
-      res.status(500).json({ error: 'Failed to fetch organization' });
+      console.error('Error fetching business unit:', error);
+      res.status(500).json({ error: 'Failed to fetch business unit' });
     }
   },
   async getOrganizationMembers(req, res) {
@@ -351,15 +357,15 @@ export const organizationController = {
         userId
       );
       if (!organization) {
-        return res.status(404).json({ error: 'Organization not found' });
+        return res.status(404).json({ error: 'Business Unit not found' });
       }
 
       const members = await getOrganizationMembersService(organization.id);
 
       res.status(200).json(members);
     } catch (error) {
-      console.error('Error fetching organization members:', error);
-      res.status(500).json({ error: 'Failed to fetch organization members' });
+      console.error('Error fetching business unit members:', error);
+      res.status(500).json({ error: 'Failed to fetch business unit members' });
     }
   },
   async subscribeToOrganization(req, res) {
@@ -375,7 +381,7 @@ export const organizationController = {
         userId
       );
       if (!organization) {
-        return res.status(404).json({ error: 'Organization not found' });
+        return res.status(404).json({ error: 'Business Unit not found' });
       }
 
       const subscription = await subscribeToOrganization(
@@ -397,15 +403,15 @@ export const organizationController = {
       await sendSubscriptionNotificationEmail(userData, organization);
 
       res.status(201).json({
-        message: 'Successfully subscribed to organization',
+        message: 'Successfully subscribed to business unit',
         subscription,
       });
     } catch (error) {
-      console.error('Error subscribing to organization:', error);
-      if (error.message === 'User is already subscribed to this organization') {
+      console.error('Error subscribing to business unit:', error);
+      if (error.message === 'User is already subscribed to this business unit') {
         return res.status(409).json({ error: error.message });
       }
-      res.status(500).json({ error: 'Failed to subscribe to organization' });
+      res.status(500).json({ error: 'Failed to subscribe to business unit' });
     }
   },
 
@@ -419,17 +425,17 @@ export const organizationController = {
         organizationId
       );
       res.status(200).json({
-        message: 'Successfully unsubscribed from organization',
+        message: 'Successfully unsubscribed from business unit',
         unsubscribed,
       });
     } catch (error) {
-      console.error('Error unsubscribing from organization:', error);
+      console.error('Error unsubscribing from business unit:', error);
       if (error.message === 'Subscription not found') {
         return res.status(404).json({ error: error.message });
       }
       res
         .status(500)
-        .json({ error: 'Failed to unsubscribe from organization' });
+        .json({ error: 'Failed to unsubscribe from business unit' });
     }
   },
   async getUserSubscriptions(req, res) {
@@ -444,18 +450,20 @@ export const organizationController = {
       if (subscribedOrganizations.length === 0) {
         return res.status(200).json({
           message: 'User has no subscriptions',
+          businessUnits: [],
           organizations: [],
         });
       }
 
       res.status(200).json({
-        message: 'Successfully retrieved subscribed organizations',
+        message: 'Successfully retrieved subscribed business units',
+        businessUnits: subscribedOrganizations,
         organizations: subscribedOrganizations,
       });
     } catch (error) {
       console.error('Error fetching user subscriptions:', error);
       res.status(500).json({
-        error: 'Failed to fetch subscribed organizations',
+        error: 'Failed to fetch subscribed business units',
       });
     }
   },

@@ -2,6 +2,7 @@ jest.mock('../../services/attachmentService.js', () => ({
   createAttachmentService: jest.fn(),
   deleteAttachmentService: jest.fn(),
   findAttachmentByUserById: jest.fn(),
+  findAttachmentByImageKey: jest.fn(),
   findAccessibleAttachmentByImageKey: jest.fn(),
   attachmentService: {
     searchAttachments: jest.fn(),
@@ -60,12 +61,10 @@ const createResponse = () => {
 describe('attachmentController', () => {
   beforeAll(async () => {
     ({ attachmentController } = await import('../attachmentController.js'));
-    ({ attachmentService, findAttachmentByUserById } = await import(
-      '../../services/attachmentService.js'
-    ));
-    ({ getResourceByIdService } = await import(
-      '../../services/resourceService.js'
-    ));
+    ({ attachmentService, findAttachmentByUserById } =
+      await import('../../services/attachmentService.js'));
+    ({ getResourceByIdService } =
+      await import('../../services/resourceService.js'));
     ({ canEditOrDeleteItem } = await import('../../utils/authHelpers.js'));
   });
 

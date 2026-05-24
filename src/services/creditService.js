@@ -2,31 +2,10 @@ import { db } from '../db/index.js';
 import { creditTransactions } from '../models/creditTransactions.js';
 import { eq, sum, and, sql } from 'drizzle-orm';
 import { desc } from 'drizzle-orm';
-import { stripe } from './stripe.js';
-import { sendPurchaseReceiptEmail } from './emailService.js';
 import { subscriptionService } from './subscriptionService.js';
-import { users } from '../models/users.js';
 
 export const CREDIT_COST_PER_QUESTION = 1;
 export const BASIC_PLAN_MONTHLY_QUESTIONS = 50;
-
-// Define product packages with Stripe product IDs
-const CREDIT_PACKAGES = {
-  basic: {
-    id: 'basic',
-    credits: 35,
-    amount: 500, // $5.00 in cents
-    stripeProductId: 'prod_SWuf8eQG4trnsP',
-    stripePriceId: 'price_1RbqpkGhSx1QaqFqKmkpGaGd',
-  },
-  premium: {
-    id: 'premium',
-    credits: 150,
-    amount: 1500, // $15.00 in cents
-    stripeProductId: 'prod_SWufmKjsyo4SOE',
-    stripePriceId: 'price_1RbqqCGhSx1QaqFqBohfe9bf',
-  },
-};
 
 export const creditService = {
   async getCreditBalance(userId) {
@@ -40,25 +19,42 @@ export const creditService = {
     return result[0]?.balance || 0;
   },
 
-  async addCredits(
-    userId,
-    amount,
-    stripeTransactionId = null,
-    paymentDetails = {}
-  ) {
+  async addCredits(userId, amount, transactionDetails = {}) {
     const [result] = await db
       .insert(creditTransactions)
       .values({
         userId,
         transactionType: 'purchase',
         amount,
-        stripeTransactionId,
         description: 'Credit purchase',
-        ...paymentDetails,
+        ...transactionDetails,
       })
       .returning();
 
     return result;
+  },
+
+  async setCreditBalance(userId, targetBalance, transactionDetails = {}) {
+    const currentBalance = await this.getCreditBalance(userId);
+    const adjustment = targetBalance - currentBalance;
+
+    const [result] = await db
+      .insert(creditTransactions)
+      .values({
+        userId,
+        transactionType: 'adjustment',
+        amount: adjustment,
+        description: 'Admin credit balance adjustment',
+        ...transactionDetails,
+      })
+      .returning();
+
+    return {
+      transaction: result,
+      previousBalance: currentBalance,
+      newBalance: targetBalance,
+      adjustment,
+    };
   },
 
   async deductCredits(userId, amount, referenceId = null) {
@@ -195,83 +191,8 @@ export const creditService = {
     return db
       .select()
       .from(creditTransactions)
-      .where(
-        and(
-          eq(creditTransactions.userId, userId),
-          eq(creditTransactions.transactionType, 'purchase')
-        )
-      )
+      .where(eq(creditTransactions.userId, userId))
       .orderBy(desc(creditTransactions.createdAt));
-  },
-
-  async validatePackage(packageId) {
-    const creditPackage = CREDIT_PACKAGES[packageId];
-    if (!creditPackage) {
-      throw new Error('Invalid package selected');
-    }
-    return creditPackage;
-  },
-
-  async processPurchase(
-    userId,
-    packageId,
-    stripeTransactionId,
-    userData = null
-  ) {
-    const creditPackage = await this.validatePackage(packageId);
-
-    // Get payment details from Stripe
-    const payment = await stripe.paymentIntents.retrieve(stripeTransactionId);
-
-    // Add credits to user's account with enhanced data
-    const transaction = await this.addCredits(
-      userId,
-      creditPackage.credits,
-      stripeTransactionId,
-      {
-        payment_status: payment.status,
-        payment_amount: payment.amount,
-        currency: payment.currency,
-      }
-    );
-
-    // Send receipt email if user data is provided
-    if (userData && userData.email) {
-      try {
-        await sendPurchaseReceiptEmail(userData, {
-          packageId,
-          credits: creditPackage.credits,
-          amount: creditPackage.amount,
-          transactionId: stripeTransactionId,
-          paymentStatus: payment.status,
-        });
-      } catch (emailError) {
-        console.error('Failed to send receipt email:', emailError);
-        // Continue with the transaction even if email fails
-      }
-    }
-
-    return {
-      transaction,
-      credits: creditPackage.credits,
-      amount: creditPackage.amount,
-    };
-  },
-
-  async createPaymentIntent(packageId, userId, email) {
-    const creditPackage = await this.validatePackage(packageId);
-
-    return {
-      amount: creditPackage.amount,
-      currency: 'usd',
-      receipt_email: email,
-      metadata: {
-        packageId: creditPackage.id,
-        userId,
-        stripeProductId: creditPackage.stripeProductId,
-        stripePriceId: creditPackage.stripePriceId,
-      },
-    };
   },
 
   async getTransaction(userId, transactionId) {
@@ -368,7 +289,7 @@ export const creditService = {
 };
 
 /**
- * Add initial/welcome credits to a new user without requiring payment
+ * Add initial/welcome credits to a new user
  *
  * @param {string|number} userId - The ID of the user to add credits to
  * @param {number} amount - The number of credits to add
@@ -387,5 +308,3 @@ export const addCreditsToUser = async (userId, amount) => {
 
   return result;
 };
-
-export { CREDIT_PACKAGES };

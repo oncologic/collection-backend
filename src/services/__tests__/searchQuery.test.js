@@ -1,8 +1,5 @@
 import { db } from '../../db/index.js';
 
-// Mock environment variables to prevent Stripe issues
-process.env.STRIPE_SECRET_KEY = 'sk_test_fake_key_for_testing';
-
 // Mock drizzle-orm
 jest.mock('drizzle-orm', () => {
   const original = jest.requireActual('drizzle-orm');
@@ -44,12 +41,6 @@ jest.mock('../../services/notationService.js', () => ({
 
 jest.mock('../../services/organizationService.js', () => ({
   getOrganizationsByIdsService: jest.fn().mockResolvedValue([]),
-}));
-
-jest.mock('../../services/stripe.js', () => ({
-  stripe: {
-    // Mock stripe methods if needed
-  },
 }));
 
 // Mock the database connection

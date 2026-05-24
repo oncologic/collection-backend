@@ -8,35 +8,11 @@ const router = express.Router();
 // Get credit balance
 router.get('/balance', requireUser(), creditController.getBalance);
 
-// Add credits (typically called after successful Stripe payment)
-router.post('/add', requireUser(), creditController.addCredits);
-
 // Get transaction history
 router.get(
   '/transactions',
   requireUser(),
   creditController.getTransactionHistory
-);
-
-// Create Stripe payment intent
-router.post(
-  '/create-payment-intent',
-  requireUser(),
-  creditController.createPaymentIntent
-);
-
-// Get billing history (includes both credit transactions and Stripe receipts)
-router.get(
-  '/billing-history',
-  requireUser(),
-  creditController.getBillingHistory
-);
-
-// Get receipt for specific transaction
-router.get(
-  '/receipt/:transactionId',
-  requireUser(),
-  creditController.getReceipt
 );
 
 // Admin routes - require admin privileges
@@ -47,14 +23,18 @@ router.get(
   creditController.getAdminBalance
 );
 
-// Add credits directly to any user's account (bypass Stripe)
+// Add credits directly to any user's account
 router.post(
   '/admin/add/:userId',
   requireAdmin(),
   creditController.addAdminCredits
 );
 
-// Webhook route - the raw body parser middleware is already applied in app.js
-router.post('/webhook', creditController.handleStripeWebhook);
+// Set any user's credit balance to an exact amount
+router.put(
+  '/admin/balance/:userId',
+  requireAdmin(),
+  creditController.setAdminCredits
+);
 
 export default router;

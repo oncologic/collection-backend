@@ -1069,7 +1069,12 @@ export async function createWorkflowInstanceFromTemplateService(
         startDate: projectStartDate,
         endDate: projectStartDate,
         publicJsonEnabled: false,
-        whiteboardData: template.whiteboardData || null,
+        whiteboardData: Object.prototype.hasOwnProperty.call(
+          options,
+          'whiteboardData'
+        )
+          ? options.whiteboardData
+          : template.whiteboardData || null,
         hashtags: Array.isArray(template.hashtags)
           ? template.hashtags.join(',') || null
           : template.hashtags || null,
@@ -2717,22 +2722,19 @@ export async function getExternalLinkByIdService(
           LIMIT 1
         ) AS event_id,
         (
-          SELECT COALESCE(cel.start_date, cel.date)
+          SELECT MIN(COALESCE(cel.start_date, cel.date))
           FROM collection_external_links cel
           WHERE cel.external_link_id = el.id
-          LIMIT 1
         ) AS date,
         (
-          SELECT COALESCE(cel.start_date, cel.date)
+          SELECT MIN(COALESCE(cel.start_date, cel.date))
           FROM collection_external_links cel
           WHERE cel.external_link_id = el.id
-          LIMIT 1
         ) AS "startDate",
         (
-          SELECT COALESCE(cel.end_date, cel.start_date, cel.date)
+          SELECT MAX(COALESCE(cel.end_date, cel.start_date, cel.date))
           FROM collection_external_links cel
           WHERE cel.external_link_id = el.id
-          LIMIT 1
         ) AS "endDate",
         COALESCE(
           (
@@ -2820,6 +2822,9 @@ export async function getExternalLinkByIdService(
         createdAt: collectionExternalLinksNotations.createdAt,
         updatedAt: collectionExternalLinksNotations.updatedAt,
         listOrder: collectionExternalLinksNotations.listOrder,
+        collectionExternalLinkId:
+          collectionExternalLinksNotations.collectionExternalLinkId,
+        collectionId: collectionExternalLinks.collectionId,
         date: sql`COALESCE(${collectionExternalLinksNotations.startDate}, ${collectionExternalLinksNotations.date})`,
         startDate: sql`COALESCE(${collectionExternalLinksNotations.startDate}, ${collectionExternalLinksNotations.date})`,
         endDate: sql`COALESCE(${collectionExternalLinksNotations.endDate}, ${collectionExternalLinksNotations.startDate}, ${collectionExternalLinksNotations.date})`,
@@ -2835,6 +2840,13 @@ export async function getExternalLinkByIdService(
         isTemplate: collectionExternalLinksNotations.isTemplate,
       })
       .from(collectionExternalLinksNotations)
+      .innerJoin(
+        collectionExternalLinks,
+        eq(
+          collectionExternalLinksNotations.collectionExternalLinkId,
+          collectionExternalLinks.id
+        )
+      )
       .where(
         and(
           inArray(
@@ -4353,6 +4365,10 @@ export async function getCollectionByIdsServiceWithResources(
                 id: collectionExternalLinks.id,
                 notes: collectionExternalLinks.notes,
                 status: collectionExternalLinks.status,
+                date: collectionExternalLinks.date,
+                startDate: collectionExternalLinks.startDate,
+                endDate: collectionExternalLinks.endDate,
+                sortOrder: collectionExternalLinks.sortOrder,
               },
               isCollaborator:
                 sql`CASE WHEN ${collectionExternalLinkCollaborators.id} IS NOT NULL THEN true ELSE false END`.mapWith(
@@ -4585,6 +4601,20 @@ export async function getCollectionByIdsServiceWithResources(
                 ...externalLink,
                 collectionExternalLinkId: collectionExternalLink.id,
                 notes: collectionExternalLink.notes,
+                date:
+                  collectionExternalLink.startDate ||
+                  collectionExternalLink.date ||
+                  null,
+                startDate:
+                  collectionExternalLink.startDate ||
+                  collectionExternalLink.date ||
+                  null,
+                endDate:
+                  collectionExternalLink.endDate ||
+                  collectionExternalLink.startDate ||
+                  collectionExternalLink.date ||
+                  null,
+                sortOrder: collectionExternalLink.sortOrder,
                 notations: notationsWithTags,
                 attachments,
                 tags: externalLinkTags,
@@ -6307,7 +6337,6 @@ export async function getExternalLinksForCollectionByIdPaginatedService(
         COALESCE(cel.end_date, cel.start_date, cel.date) AS "endDate",
         el.visibility,
         el.type,
-        el.is_google_calendar_event,
         el.start_time,
         el.end_time,
         el.timezone,

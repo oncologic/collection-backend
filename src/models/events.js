@@ -10,12 +10,21 @@ import {
   date,
   jsonb,
   primaryKey,
+  customType,
 } from 'drizzle-orm/pg-core';
 import { relations } from 'drizzle-orm';
 import { expertiseLevels, eventTypes } from './metadata.js';
 // import { targetAudiences } from "./metadata.js";
 import { organizations } from './organizations.js';
 import { users } from './users.js';
+import { tenants } from './tenants.js';
+
+// Define custom vector type for pgvector
+const vector = customType({
+  dataType() {
+    return 'vector(1536)';
+  },
+});
 
 // Events table
 export const events = pgTable('events', {
@@ -50,7 +59,11 @@ export const events = pgTable('events', {
   timezone: varchar('timezone', { length: 136 }),
   hasSponsorship: boolean('has_sponsorship').default(false),
   tenantId: uuid('tenant_id').references(() => tenants.id),
-  isGoogleCalendarEvent: boolean('is_google_calendar_event').default(false),
+  titleEmbedding: vector('title_embedding'),
+  descriptionEmbedding: vector('description_embedding'),
+  locationEmbedding: vector('location_embedding'),
+  combinedEmbedding: vector('combined_embedding'),
+  vectorUpdatedAt: timestamp('vector_updated_at'),
 });
 
 // Event Tags junction table
@@ -95,10 +108,6 @@ export const eventsRelations = relations(events, ({ one, many }) => ({
     references: [expertiseLevels.id],
   }),
   organizationEvents: many(organizationEvents),
-}));
-
-export const eventTypesRelations = relations(eventTypes, ({ many }) => ({
-  events: many(events),
 }));
 
 export const eventTagsRelations = relations(eventTags, ({ one }) => ({

@@ -1,14 +1,8 @@
-process.env.STRIPE_SECRET_KEY = 'sk_test_fake_key_for_testing';
-
 // Mock the database module
 jest.mock('../../db/index.js', () => ({
   db: {
     select: jest.fn(),
   },
-}));
-
-jest.mock('../stripe.js', () => ({
-  stripe: {},
 }));
 
 // Mock the getTagsForNotation function

@@ -140,11 +140,8 @@ export const subscriptionService = {
   async updateUserSubscriptionPlan(
     userId,
     planName,
-    subscriptionId = null,
-    options = {}
+    subscriptionEndDate = null
   ) {
-    const { cancelStripeSubscription = false } = options;
-
     const plan = await db
       .select()
       .from(subscriptionPlans)
@@ -160,39 +157,19 @@ export const subscriptionService = {
       throw new Error('Invalid subscription plan');
     }
 
-    // If downgrading to basic and cancelStripeSubscription is true, handle Stripe cancellation
-    if (planName === 'basic' && cancelStripeSubscription) {
-      // Get user's current Stripe subscription
-      const user = await db
-        .select({
-          stripeSubscriptionId: users.stripeSubscriptionId,
-        })
-        .from(users)
-        .where(eq(users.id, userId))
-        .limit(1);
-
-      // If user has a Stripe subscription, we need to cancel it
-      if (user[0]?.stripeSubscriptionId) {
-        // Import stripeSubscriptionService dynamically to avoid circular dependency
-        const { stripeSubscriptionService } = await import(
-          './stripeSubscriptionService.js'
-        );
-        await stripeSubscriptionService.cancelSubscription(userId);
-      }
-    }
-
     const updateData = {
       subscriptionPlan: planName,
       subscriptionStatus: 'active',
       subscriptionStartDate: new Date(),
-      stripeSubscriptionId: subscriptionId,
+      subscriptionEndDate: subscriptionEndDate
+        ? new Date(subscriptionEndDate)
+        : null,
       updatedAt: new Date(),
     };
 
-    // For basic plan, clear Stripe subscription ID
+    // Basic plan access does not expire.
     if (planName === 'basic') {
-      updateData.stripeSubscriptionId = null;
-      updateData.subscriptionEndDate = null; // Basic plan doesn't expire
+      updateData.subscriptionEndDate = null;
     }
 
     const [updatedUser] = await db
@@ -370,7 +347,6 @@ export const subscriptionService = {
       changeType: isUpgrade ? 'upgrade' : isDowngrade ? 'downgrade' : 'lateral',
       currentPlan: currentPlan.name,
       requestedPlan: newPlanName,
-      requiresPayment: newPlan[0].price > 0,
     };
   },
 

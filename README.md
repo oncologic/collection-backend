@@ -9,8 +9,8 @@ workflows, subscriptions, integrations, and public sharing.
 - Node.js with Express
 - PostgreSQL with Drizzle ORM
 - Clerk authentication
-- Optional integrations for S3/CloudFront, OpenAI, Anthropic, Stripe, Resend,
-  Twilio, Slack, and Google Calendar
+- Optional integrations for Azure Blob Storage, OpenAI, Anthropic, Resend,
+  Twilio, and Slack
 - Jest for tests
 
 ## Prerequisites
@@ -51,8 +51,8 @@ npm start
 
 ## Environment Variables
 
-The exact set depends on which features are enabled. Keep all real values out
-of Git.
+The exact set depends on which features are enabled. Keep all real values out of
+Git.
 
 ### Core
 
@@ -101,12 +101,13 @@ ANTHROPIC_API_KEY=
 OCR_SERVICE_URL=
 OCR_API_KEY=
 
-# Optional: route backend chat/text LLM calls through a LiteLLM proxy.
-# The app keeps its existing RAG/reference hydration contract. LiteLLM replaces
-# the text model gateway for chat and structured text generation. OCR/image
-# processing still uses OCR_SERVICE_URL.
+# Optional: route backend chat/text LLM calls through an OpenAI-compatible
+# gateway such as LiteLLM or a local Ollama server. The app keeps its existing
+# RAG/reference hydration contract. OCR/image processing still uses OCR_SERVICE_URL.
 LLM_GATEWAY=litellm
 LITELLM_BASE_URL=http://localhost:4000
+OPENAI_COMPATIBLE_BASE_URL=
+OPENAI_COMPATIBLE_API_KEY=
 LITELLM_API_KEY=
 LITELLM_DEFAULT_MODEL=gpt-4o-mini
 LITELLM_FAST_MODEL=
@@ -116,21 +117,19 @@ LITELLM_DISABLE_JSON_RESPONSE_FORMAT=false
 # Optional JSON for exact legacy-to-proxy model aliases:
 # LITELLM_MODEL_MAP={"claude-haiku-4-5":"my-fast-model","claude-3-5-sonnet-20241022":"my-reasoning-model","gemini-2.5-flash":"my-default-model"}
 
-AWS_ACCESS_KEY_ID=
-AWS_SECRET_ACCESS_KEY=
-AWS_REGION=
-AWS_BUCKET_NAME=
-CLOUDFRONT_DOMAIN=
-CLOUDFRONT_KEY_PAIR=
-CLOUDFRONT_PRIVATE=
+AZURE_STORAGE_ACCOUNT_NAME=
+AZURE_STORAGE_ACCOUNT_KEY=
+AZURE_STORAGE_CONTAINER_NAME=
+# Optional alternative to account name/key. The container name is still required.
+AZURE_STORAGE_CONNECTION_STRING=
+# Optional for custom domains, private endpoints, or Azurite.
+AZURE_STORAGE_BLOB_ENDPOINT=
+# Set true only if the container/blob access level is intentionally public.
+AZURE_STORAGE_PUBLIC_ACCESS=false
 
 RESEND_API_KEY=
 RESEND_FROM_EMAIL=
 ADMIN_EMAIL=
-
-STRIPE_SECRET_KEY=
-STRIPE_WEBHOOK_SECRET=
-STRIPE_SUBSCRIPTION_WEBHOOK_SECRET=
 
 TWILIO_ACCOUNT_SID=
 TWILIO_AUTH_TOKEN=
@@ -145,6 +144,11 @@ SLACK_CLIENT_ID=
 SLACK_CLIENT_SECRET=
 SLACK_REDIRECT_URI=
 ```
+
+For browser direct-to-Azure attachment uploads, configure Azure Storage CORS to
+allow your frontend origin to send `PUT` requests with `content-type` and
+`x-ms-blob-type` headers. Upload SAS URLs are signed with `JWT_SECRET`, so keep
+that value stable across backend instances.
 
 ### LiteLLM setup notes
 
@@ -167,6 +171,33 @@ For production, run LiteLLM with a config file, virtual keys, provider API keys
 stored outside the app, and point this backend at the proxy with
 `LITELLM_BASE_URL` and `LITELLM_API_KEY`.
 
+### Local Gemma 4 with Ollama
+
+For a fully local model, run Gemma 4 through Ollama's OpenAI-compatible API and
+point the backend directly at it:
+
+```bash
+brew install ollama
+ollama serve
+ollama pull gemma4:e4b
+```
+
+Then set:
+
+```env
+LLM_GATEWAY=openai-compatible
+OPENAI_COMPATIBLE_BASE_URL=http://localhost:11434/v1
+LITELLM_DEFAULT_MODEL=gemma4:e4b
+LITELLM_FAST_MODEL=gemma4:e4b
+LITELLM_REASONING_MODEL=gemma4:e4b
+```
+
+Use `gemma4:e2b` on smaller machines, `gemma4:e4b` for the default local setup,
+and `gemma4:26b` or `gemma4:31b` only when the machine has enough memory/GPU
+headroom. If Ollama rejects OpenAI JSON response format for a model, set
+`LITELLM_DISABLE_JSON_RESPONSE_FORMAT=true`; the backend will still prompt for
+JSON and parse the response.
+
 ## Database
 
 Run Drizzle migrations:
@@ -175,10 +206,10 @@ Run Drizzle migrations:
 npm run migrate
 ```
 
-This command uses `src/db/migrate.js` and the migrations in
-`src/db/migrations`. The repository also contains SQL migration files under
-`migrations/` and `src/migrations/`; apply those according to your deployment
-process if your environment depends on them.
+This command uses `src/db/migrate.js` and the migrations in `src/db/migrations`.
+The repository also contains SQL migration files under `migrations/` and
+`src/migrations/`; apply those according to your deployment process if your
+environment depends on them.
 
 Seed local data after migrations:
 
@@ -236,7 +267,6 @@ Most routes are mounted under `/api`.
 - `/api/credits`
 - `/api/invitations`
 - `/api/tenant-invites`
-- `/api/google-calendar`
 - `/api/slack`
 - `/api/sms`
 
@@ -264,9 +294,9 @@ tests/               Additional test files
 
 - Do not commit `.env`, `.env.local`, provider credentials, API keys, private
   keys, uploaded user files, or production runbooks.
-- Keep public documentation focused on setup and usage. Internal security
-  design notes, incident summaries, and operational procedures should live in a
-  private system.
+- Keep public documentation focused on setup and usage. Internal security design
+  notes, incident summaries, and operational procedures should live in a private
+  system.
 - Rotate any provider credentials that were ever committed, shared publicly, or
   exposed in logs.
 

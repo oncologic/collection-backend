@@ -55,7 +55,7 @@ const requestCounts = new Map();
 const { general, dragDrop, cleanup } = rateLimitConfig.rateLimit;
 
 // Cleanup old entries
-setInterval(() => {
+const cleanupInterval = setInterval(() => {
   const now = Date.now();
   const sizeBefore = requestCounts.size;
   for (const [key, data] of requestCounts.entries()) {
@@ -70,6 +70,7 @@ setInterval(() => {
     );
   }
 }, cleanup.interval);
+cleanupInterval.unref?.();
 
 export const rateLimitByUser = (
   maxRequests = general.maxRequests,

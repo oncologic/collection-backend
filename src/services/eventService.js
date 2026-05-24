@@ -13,6 +13,7 @@ import {
 } from '../models/metadata.js';
 import { organizationMembers } from '../models/organizations.js';
 import { generatePresignedCloudFrontUrl } from '../utils/cloudFrontSigner.js';
+import { autoUpdateEventEmbedding } from './vectorService.js';
 
 // Helper to build community tenant visibility condition for events
 // Community tenant events are ONLY visible to their creator
@@ -78,24 +79,6 @@ const getEventsWithRelations = (qb, dbUserId, tenants) => {
       addedByUserId: events.addedByUserId,
       hasSponsorship: events.hasSponsorship,
       professional: events.professional,
-      isGoogleCalendarEvent: events.isGoogleCalendarEvent,
-      googleCalendarSync: sql`
-        COALESCE(
-          (
-            SELECT jsonb_build_object(
-              'googleEventId', gce.google_event_id,
-              'googleCalendarId', gce.google_calendar_id,
-              'syncStatus', gce.sync_status,
-              'syncDirection', gce.sync_direction,
-              'lastSyncedAt', gce.last_synced_at
-            )
-            FROM google_calendar_events gce
-            WHERE gce.entity_type = 'event' AND gce.entity_id = ${events.id}
-            LIMIT 1
-          ),
-          NULL
-        )
-      `.as('googleCalendarSync'),
       organizations: sql`
         COALESCE(
           (
@@ -180,7 +163,7 @@ export async function createEventService(data, dbUserId, tenantIds) {
       updatedAt: sql`CURRENT_TIMESTAMP`,
     };
 
-    return await db.transaction(async (tx) => {
+    const event = await db.transaction(async (tx) => {
       const [event] = await tx.insert(events).values(eventData).returning();
 
       // Handle tags
@@ -210,6 +193,15 @@ export async function createEventService(data, dbUserId, tenantIds) {
 
       return event;
     });
+
+    autoUpdateEventEmbedding(event.id).catch((embeddingError) => {
+      console.error(
+        'Failed to update event embeddings after create:',
+        embeddingError
+      );
+    });
+
+    return event;
   } catch (error) {
     console.error('Error creating event:', error);
     throw new Error('Failed to create event');
@@ -269,7 +261,7 @@ export const updateEventService = async (eventId, eventData) => {
         : undefined,
     };
 
-    return await db.transaction(async (tx) => {
+    const event = await db.transaction(async (tx) => {
       // Remove organizations if any are specified
       if (organizationsToRemove.length > 0) {
         await tx.execute(
@@ -320,6 +312,17 @@ export const updateEventService = async (eventId, eventData) => {
 
       return result.rows[0];
     });
+
+    if (event?.id) {
+      autoUpdateEventEmbedding(event.id).catch((embeddingError) => {
+        console.error(
+          'Failed to update event embeddings after update:',
+          embeddingError
+        );
+      });
+    }
+
+    return event;
   } catch (error) {
     console.error('Error in updateEventService:', error);
     throw error;

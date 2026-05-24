@@ -54,7 +54,6 @@ export const collectionExternalLinksNotations = pgTable(
     endTime: time('end_time'),
     timezone: varchar('timezone', { length: 100 }),
     type: varchar('type', { length: 100 }),
-    isGoogleCalendarEvent: boolean('is_google_calendar_event').default(false),
     // Template and custom fields support
     templateId: uuid('template_id'),
     customFields: jsonb('custom_fields').default({}),

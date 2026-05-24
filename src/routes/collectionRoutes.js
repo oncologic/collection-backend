@@ -158,6 +158,12 @@ router.get(
   collectionController.getExternalLinkById
 );
 
+router.patch(
+  '/external-link/:externalLinkId/whiteboard',
+  requireUserAndTenants(),
+  collectionController.updateExternalLinkWhiteboard
+);
+
 router.delete(
   '/:id/external-link/:externalLinkId',
   requireUserAndTenants(),

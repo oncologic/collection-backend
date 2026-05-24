@@ -27,7 +27,7 @@ export const organizationTags = pgTable('organization_tags', {
 
 export const organizations = pgTable('organizations', {
   id: uuid('id').defaultRandom().primaryKey(),
-  name: varchar('name', { length: 136 }),
+  name: varchar('name', { length: 136 }).notNull(),
   acronym: varchar('acronym', { length: 136 }),
   description: text('description'),
   website: text('website'),

@@ -6,6 +6,7 @@ import {
   searchAllContentService,
   processImageService,
   generateChatWithAiAgents,
+  getChatModelStatusLabel,
   makeAiAgentRequest,
   generateStructuredNotationsService,
   generateBulkNotationUpdatesService,
@@ -88,6 +89,180 @@ const collectReferenceIds = (value, ids = new Set()) => {
   return ids;
 };
 
+const normalizeReferenceType = (type) => {
+  const normalized = String(type || '').toLowerCase();
+
+  if (['external_link', 'externallink', 'link'].includes(normalized)) {
+    return 'external_link';
+  }
+
+  if (['workflow_template', 'template'].includes(normalized)) {
+    return 'collection';
+  }
+
+  if (['link_group', 'linkgroup'].includes(normalized)) {
+    return 'link_group';
+  }
+
+  if (['social_media_account', 'socialmediaaccount'].includes(normalized)) {
+    return 'social_media_account';
+  }
+
+  return normalized || null;
+};
+
+const inferReferenceTypeFromKey = (key) => {
+  const normalized = String(key || '').toLowerCase();
+  const typeByKey = {
+    collections: 'collection',
+    templates: 'collection',
+    workflowtemplatesuggestions: 'collection',
+    externallinks: 'external_link',
+    selectedexternallinks: 'external_link',
+    resources: 'resource',
+    events: 'event',
+    attachments: 'attachment',
+    linkgroups: 'link_group',
+    notations: 'notation',
+    organizations: 'organization',
+    socialmediaaccounts: 'social_media_account',
+  };
+
+  return typeByKey[normalized] || null;
+};
+
+const toCleanString = (value) =>
+  typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : '';
+
+const normalizeMatchedTerms = (value) => {
+  if (!Array.isArray(value)) return [];
+
+  return [
+    ...new Set(
+      value
+        .map((term) => toCleanString(term))
+        .filter(Boolean)
+        .slice(0, 6)
+    ),
+  ];
+};
+
+const buildReferenceSelectionReason = (item = {}) => {
+  const explicitReason = toCleanString(
+    item.selectionReason ||
+      item.selection_reason ||
+      item.reason ||
+      item.rationale ||
+      item.matchReason ||
+      item.match_reason ||
+      ''
+  );
+
+  if (explicitReason) return explicitReason;
+
+  const matchedTerms = normalizeMatchedTerms(
+    item.matchedTerms || item.matched_terms
+  );
+  if (matchedTerms.length > 0) {
+    return `It matched the request on: ${matchedTerms.join(', ')}.`;
+  }
+
+  const similarity = Number.parseFloat(item.similarity || item.similarity_score);
+  if (Number.isFinite(similarity) && similarity >= 1) {
+    return 'The user explicitly selected or mentioned this item for the chat.';
+  }
+
+  if (Number.isFinite(similarity) && similarity > 0) {
+    const typeLabel = normalizeReferenceType(
+      item.content_type || item.search_type || item.type
+    );
+    return `It was retrieved as a semantic ${String(typeLabel || 'item').replace(
+      /_/g,
+      ' '
+    )} match for this question.`;
+  }
+
+  return null;
+};
+
+const addReferenceMetadata = (metadataByKey, item = {}, typeHint) => {
+  if (!item || typeof item !== 'object' || !isUuid(item.id)) return;
+
+  const id = item.id.trim();
+  const type = normalizeReferenceType(
+    typeHint || item.content_type || item.search_type || item.type
+  );
+  const matchedTerms = normalizeMatchedTerms(
+    item.matchedTerms || item.matched_terms
+  );
+  const selectionReason = buildReferenceSelectionReason(item);
+  const similarity = item.similarity ?? item.similarity_score ?? null;
+  const metadata = {
+    referenceType: type,
+    selectionReason,
+    matchedTerms,
+    similarity,
+  };
+  const keys = [id, type ? `${type}:${id}` : null].filter(Boolean);
+
+  keys.forEach((key) => {
+    const existing = metadataByKey.get(key) || {};
+    metadataByKey.set(key, {
+      ...existing,
+      ...metadata,
+      selectionReason: selectionReason || existing.selectionReason || null,
+      matchedTerms:
+        matchedTerms.length > 0 ? matchedTerms : existing.matchedTerms || [],
+      similarity: similarity ?? existing.similarity ?? null,
+    });
+  });
+};
+
+const collectReferenceMetadata = (value, metadataByKey = new Map(), typeHint) => {
+  if (!value) return metadataByKey;
+
+  if (Array.isArray(value)) {
+    value.forEach((item) =>
+      collectReferenceMetadata(item, metadataByKey, typeHint)
+    );
+    return metadataByKey;
+  }
+
+  if (typeof value === 'object') {
+    addReferenceMetadata(metadataByKey, value, typeHint);
+
+    Object.entries(value).forEach(([key, item]) => {
+      collectReferenceMetadata(
+        item,
+        metadataByKey,
+        inferReferenceTypeFromKey(key) || typeHint
+      );
+    });
+  }
+
+  return metadataByKey;
+};
+
+const annotateReferencedItems = (items = [], type, metadataByKey) =>
+  items.map((item) => {
+    const id = item?.id;
+    if (!id) return item;
+
+    const normalizedType = normalizeReferenceType(type || item.type);
+    const metadata =
+      metadataByKey.get(`${normalizedType}:${id}`) || metadataByKey.get(id);
+
+    if (!metadata) return item;
+
+    return {
+      ...item,
+      referenceType: metadata.referenceType || normalizedType,
+      selectionReason: item.selectionReason || metadata.selectionReason,
+      matchedTerms: item.matchedTerms || metadata.matchedTerms,
+      similarity: item.similarity ?? metadata.similarity,
+    };
+  });
+
 const normalizeTagName = (value) => String(value || '').trim();
 
 const resolveStructuredExternalLinkTagIds = async (
@@ -101,7 +276,8 @@ const resolveStructuredExternalLinkTagIds = async (
 
   const resolvedTagIds = new Set();
   const tagNamesByKey = new Map();
-  const primaryTenantId = tenantIds?.[0] || process.env.COMMUNITY_TENANT || null;
+  const primaryTenantId =
+    tenantIds?.[0] || process.env.COMMUNITY_TENANT || null;
 
   rawTags.forEach((rawTag) => {
     if (!rawTag) {
@@ -152,7 +328,11 @@ const resolveStructuredExternalLinkTagIds = async (
   }
 
   const tagNames = Array.from(tagNamesByKey.values()).map((tag) => tag.name);
-  const existingTagMap = await getTagIdsByNamesService([tagNames], userId, tenantIds);
+  const existingTagMap = await getTagIdsByNamesService(
+    [tagNames],
+    userId,
+    tenantIds
+  );
 
   for (const tagMeta of tagNamesByKey.values()) {
     const matchedTag = existingTagMap.get(tagMeta.name.toLowerCase());
@@ -329,7 +509,7 @@ export const aiController = {
           expectedResponseLength: data.mentionedItems?.length > 5 ? 500 : 200,
         });
         sendUpdate('modelSelected', {
-          status: `Using ${modelForQuestion.recommended} for processing... because ${modelForQuestion.reason}`,
+          status: `Using ${getChatModelStatusLabel(modelForQuestion.recommended)} for processing... because ${modelForQuestion.reason}`,
         });
         // Send processing update
         sendUpdate('processing', { status: 'Processing data...' });
@@ -705,7 +885,7 @@ export const aiController = {
 
       sendUpdate('modelSelected', {
         model: finalModel,
-        status: `Using ${finalModel} for processing...`,
+        status: `Using ${getChatModelStatusLabel(finalModel)} for processing...`,
       });
 
       // Process the data with AI using processed data with routes
@@ -745,7 +925,16 @@ export const aiController = {
         };
       }
 
-      const idsToFind = collectReferenceIds(processedData.references);
+      const idsToFind = collectReferenceIds([
+        processedData.references,
+        processedData.workflowTemplateSuggestions,
+        processedData.collectionPlanSuggestion,
+      ]);
+      const referenceMetadata = collectReferenceMetadata([
+        processedData.retrievedContent,
+        processedData.workflowTemplateSuggestions,
+        processedData.collectionPlanSuggestion,
+      ]);
 
       const basicCollectionData = await getBasicCollectionsByIdsService(
         Array.from(idsToFind),
@@ -802,15 +991,55 @@ export const aiController = {
       return {
         answer: processedData.response || processedData.answer,
         data: {
-          collections: basicCollectionData,
-          externalLinks: basicExternalLinkData,
-          resources: basicResourceData,
-          events: basicEventData,
-          attachments: basicAttachmentData,
-          linkGroups: basicLinkGroupData,
-          notations: basicNotationData,
-          organizations: basicOrganizationData,
-          socialMediaAccounts: basicSocialMediaAccountData,
+          collections: annotateReferencedItems(
+            basicCollectionData,
+            'collection',
+            referenceMetadata
+          ),
+          externalLinks: annotateReferencedItems(
+            basicExternalLinkData,
+            'external_link',
+            referenceMetadata
+          ),
+          resources: annotateReferencedItems(
+            basicResourceData,
+            'resource',
+            referenceMetadata
+          ),
+          events: annotateReferencedItems(
+            basicEventData,
+            'event',
+            referenceMetadata
+          ),
+          attachments: annotateReferencedItems(
+            basicAttachmentData,
+            'attachment',
+            referenceMetadata
+          ),
+          linkGroups: annotateReferencedItems(
+            basicLinkGroupData,
+            'link_group',
+            referenceMetadata
+          ),
+          notations: annotateReferencedItems(
+            basicNotationData,
+            'notation',
+            referenceMetadata
+          ),
+          organizations: annotateReferencedItems(
+            basicOrganizationData,
+            'organization',
+            referenceMetadata
+          ),
+          socialMediaAccounts: annotateReferencedItems(
+            basicSocialMediaAccountData,
+            'social_media_account',
+            referenceMetadata
+          ),
+          workflowTemplateSuggestions:
+            processedData.workflowTemplateSuggestions || [],
+          collectionPlanSuggestion:
+            processedData.collectionPlanSuggestion || null,
         },
       };
     } catch (error) {
@@ -1441,12 +1670,10 @@ export const aiController = {
       }
 
       // Import necessary services
-      const { createEventService } = await import(
-        '../services/eventService.js'
-      );
-      const { createOrganizationService } = await import(
-        '../services/organizationService.js'
-      );
+      const { createEventService } =
+        await import('../services/eventService.js');
+      const { createOrganizationService } =
+        await import('../services/organizationService.js');
 
       // Create a mapping for new organizations
       const organizationMapping = new Map();
@@ -1731,12 +1958,10 @@ export const aiController = {
       }
 
       // Import necessary services
-      const { createResourceService } = await import(
-        '../services/resourceService.js'
-      );
-      const { createOrganizationService } = await import(
-        '../services/organizationService.js'
-      );
+      const { createResourceService } =
+        await import('../services/resourceService.js');
+      const { createOrganizationService } =
+        await import('../services/organizationService.js');
 
       // Create a mapping for new organizations
       const organizationMapping = new Map();
@@ -2000,9 +2225,8 @@ export const aiController = {
       }
 
       // Import the social media controller to use bulk create
-      const { socialMediaController } = await import(
-        './socialMediaController.js'
-      );
+      const { socialMediaController } =
+        await import('./socialMediaController.js');
 
       // Prepare the request object for bulk create
       const bulkReq = {
@@ -2085,9 +2309,8 @@ export const aiController = {
       const { tags = [] } = metadata;
 
       // Import the service
-      const { generateStructuredExternalLinksService } = await import(
-        '../services/aiService.js'
-      );
+      const { generateStructuredExternalLinksService } =
+        await import('../services/aiService.js');
 
       // Generate structured external links using AI (no database save)
       const structuredResult = await generateStructuredExternalLinksService(

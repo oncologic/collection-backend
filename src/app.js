@@ -7,6 +7,7 @@ import cors from 'cors';
 import multer from 'multer';
 
 import organizationRoutes from './routes/organizationRoutes.js';
+import businessUnitRoutes from './routes/businessUnitRoutes.js';
 import tagRoutes from './routes/tagRoutes.js';
 import metadataRoutes from './routes/metadataRoutes.js';
 import resourceRoutes from './routes/resourceRoutes.js';
@@ -34,7 +35,6 @@ import publicShareRoutes from './routes/publicShareRoutes.js';
 import collectionExternalLinkTagRoutes from './routes/collectionExternalLinkTags.js';
 import systemRoutes from './routes/systemRoutes.js';
 import webhookRoutes from './routes/webhookRoutes.js';
-import googleCalendarRoutes from './routes/googleCalendarRoutes.js';
 import { collectionExternalLinkResourceRoutes } from './routes/collectionExternalLinkResourceRoutes.js';
 import importRoutes from './routes/importRoutes.js';
 import smsRoutes from './routes/smsRoutes.js';
@@ -154,9 +154,6 @@ app.use(
 // Configure multer for memory storage
 const upload = multer({ storage: multer.memoryStorage() });
 
-// Add this BEFORE your regular express.json() middleware
-app.use('/api/credits/webhook', express.raw({ type: 'application/json' }));
-
 // Your regular middleware
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
@@ -176,6 +173,7 @@ app.use(clerkMiddleware());
 app.use('/api', directMetadataRoutes);
 
 app.use('/api/organizations', organizationRoutes);
+app.use('/api/business-units', businessUnitRoutes);
 app.use('/api/tags', tagRoutes);
 app.use('/api/metadata', metadataRoutes);
 app.use('/api/resources', resourceRoutes);
@@ -203,7 +201,6 @@ app.use('/api/collection-external-link-tags', collectionExternalLinkTagRoutes);
 app.use('/api', collectionExternalLinkResourceRoutes);
 app.use('/api/system', systemRoutes);
 app.use('/api/webhooks', webhookRoutes);
-app.use('/api/google-calendar', googleCalendarRoutes);
 app.use('/api/import', importRoutes);
 app.use('/api/sms', smsRoutes);
 app.use('/api/notation-templates', notationTemplateRoutes);

@@ -12,18 +12,20 @@ afterAll(async () => {
     // Ignore errors when stopping monitoring
   }
 
-  // Close any open database connections with timeout (non-blocking)
-  // Don't await - let it close in background, timeout after 2 seconds
+  // Close any open database connections with timeout.
   try {
     const { pool } = await import('./src/db/index.js');
     if (pool && typeof pool.end === 'function') {
-      // Fire and forget - don't wait for it to complete
-      Promise.race([
+      let timeoutId;
+      await Promise.race([
         pool.end(),
-        new Promise((resolve) => setTimeout(resolve, 2000)),
-      ]).catch(() => {
-        // Ignore errors - pool will close when process exits
-      });
+        new Promise((resolve) => {
+          timeoutId = setTimeout(resolve, 2000);
+        }),
+      ]);
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
     }
   } catch (error) {
     // Ignore errors when closing connections

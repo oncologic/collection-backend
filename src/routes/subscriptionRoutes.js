@@ -24,16 +24,6 @@ router.get(
   subscriptionController.getUserSubscription
 );
 
-// Get user's invoice history (for frontend /api/subscriptions/invoices)
-router.get('/invoices', requireUser(), subscriptionController.getInvoices);
-
-// Create Stripe subscription
-router.post(
-  '/create-subscription',
-  requireUser(),
-  subscriptionController.createStripeSubscription
-);
-
 // Validate plan change
 router.post(
   '/validate-plan-change',
@@ -62,32 +52,11 @@ router.post(
   subscriptionController.changeSubscriptionPlan
 );
 
-// Clean up duplicate subscriptions
-router.post(
-  '/cleanup-duplicates',
-  requireUser(),
-  subscriptionController.cleanupDuplicateSubscriptions
-);
-
-// Sync subscription status with Stripe (for edge cases)
-router.post(
-  '/sync-status',
-  requireUser(),
-  subscriptionController.syncSubscriptionStatus
-);
-
 // Cancel subscription
 router.post(
   '/cancel',
   requireUser(),
   subscriptionController.cancelSubscription
-);
-
-// Reactivate subscription
-router.post(
-  '/reactivate',
-  requireUser(),
-  subscriptionController.reactivateSubscription
 );
 
 // Update user's subscription plan (manual)
@@ -110,8 +79,5 @@ router.get(
   requireUser(),
   subscriptionController.getSubscriptionLimits
 );
-
-// Stripe webhook for subscription events
-router.post('/webhook', subscriptionController.handleStripeWebhook);
 
 export default router;

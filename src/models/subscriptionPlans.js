@@ -19,10 +19,6 @@ export const subscriptionPlans = pgTable('subscription_plans', {
     .notNull()
     .default('monthly'), // monthly, yearly
 
-  // Stripe integration
-  stripeProductId: varchar('stripe_product_id', { length: 100 }),
-  stripePriceId: varchar('stripe_price_id', { length: 100 }),
-
   // Collection limits
   maxExternalCollections: integer('max_external_collections').default(-1), // -1 means unlimited
   maxRegularCollections: integer('max_regular_collections').default(-1), // -1 means unlimited

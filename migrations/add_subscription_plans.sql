@@ -7,10 +7,6 @@ CREATE TABLE IF NOT EXISTS subscription_plans (
   price DECIMAL(10, 2) NOT NULL,
   billing_interval VARCHAR(20) NOT NULL DEFAULT 'monthly',
   
-  -- Stripe integration
-  stripe_product_id VARCHAR(100),
-  stripe_price_id VARCHAR(100),
-  
   -- Collection limits
   max_external_collections INTEGER DEFAULT -1, -- -1 means unlimited
   max_regular_collections INTEGER DEFAULT -1, -- -1 means unlimited
@@ -40,9 +36,7 @@ ALTER TABLE users
 ADD COLUMN IF NOT EXISTS subscription_plan VARCHAR(50) NOT NULL DEFAULT 'basic',
 ADD COLUMN IF NOT EXISTS subscription_status VARCHAR(20) NOT NULL DEFAULT 'active',
 ADD COLUMN IF NOT EXISTS subscription_start_date TIMESTAMP DEFAULT NOW(),
-ADD COLUMN IF NOT EXISTS subscription_end_date TIMESTAMP,
-ADD COLUMN IF NOT EXISTS stripe_customer_id VARCHAR(100),
-ADD COLUMN IF NOT EXISTS stripe_subscription_id VARCHAR(100);
+ADD COLUMN IF NOT EXISTS subscription_end_date TIMESTAMP;
 
 -- Insert default subscription plans
 INSERT INTO subscription_plans (
@@ -94,16 +88,8 @@ ON CONFLICT (name) DO NOTHING;
 -- Create index on subscription_plan for faster lookups
 CREATE INDEX IF NOT EXISTS idx_users_subscription_plan ON users(subscription_plan);
 CREATE INDEX IF NOT EXISTS idx_subscription_plans_name ON subscription_plans(name);
-CREATE INDEX IF NOT EXISTS idx_subscription_plans_active_sort ON subscription_plans(is_active, sort_order); 
-
-
-ALTER TABLE subscription_plans
-ADD COLUMN IF NOT EXISTS stripe_product_id VARCHAR(100),
-ADD COLUMN IF NOT EXISTS stripe_price_id VARCHAR(100);
+CREATE INDEX IF NOT EXISTS idx_subscription_plans_active_sort ON subscription_plans(is_active, sort_order);
 
 ALTER TABLE users
-ADD COLUMN IF NOT EXISTS stripe_customer_id VARCHAR(100),
-ADD COLUMN IF NOT EXISTS stripe_subscription_id VARCHAR(100);
-ADD COLUMN IF NOT EXISTS subscription_start_date TIMESTAMP;
+ADD COLUMN IF NOT EXISTS subscription_start_date TIMESTAMP,
 ADD COLUMN IF NOT EXISTS subscription_end_date TIMESTAMP;
-

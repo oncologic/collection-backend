@@ -1012,11 +1012,33 @@ const WORKFLOW_PLANNING_TERMS = [
   'new idea',
   'build an app',
   'build this project',
+  'build this',
+  'create an app',
+  'create a new app',
+  'create an application',
+  'create a new application',
+  'develop an app',
+  'develop an application',
   'bring this project to life',
   'bring this idea to life',
+  'what would it take',
+  'what would this take',
+  'what will it take',
+  'what does it take',
   'what will be needed',
   'what is needed',
+  'what do i need',
+  'what would be needed',
+  'requirements',
   'project plan',
+  'turn it into a project',
+  'turn this into a project',
+  'whiteboard session',
+  'whiteboarding session',
+  'process plan',
+  'process and a plan',
+  'planning',
+  'how long',
   'timeline',
   'workflow',
   'template',
@@ -1024,9 +1046,29 @@ const WORKFLOW_PLANNING_TERMS = [
 
 const isWorkflowPlanningRequest = (prompt = '') => {
   const lower = String(prompt).toLowerCase();
+  const hasContextualPlanningIntent =
+    (/(turn|make|convert|build)\s+(this|it|that)\s+into/.test(lower) &&
+      ['plan', 'process', 'project', 'workflow', 'template'].some((term) =>
+        lower.includes(term)
+      )) ||
+    (lower.includes('whiteboard') &&
+      ['project', 'plan', 'process', 'workflow'].some((term) =>
+        lower.includes(term)
+      )) ||
+    lower.includes('process and a plan') ||
+    lower.includes('process plan');
   const hasPlanningTerm = WORKFLOW_PLANNING_TERMS.some((term) =>
     lower.includes(term)
   );
+  const hasCreationVerb = [
+    'build',
+    'create',
+    'develop',
+    'make',
+    'launch',
+    'plan',
+    'implement',
+  ].some((term) => lower.includes(term));
   const hasCreationSubject = [
     'app',
     'application',
@@ -1038,8 +1080,648 @@ const isWorkflowPlanningRequest = (prompt = '') => {
     'website',
   ].some((term) => lower.includes(term));
 
-  return hasPlanningTerm && hasCreationSubject;
+  return hasContextualPlanningIntent || (hasCreationSubject && (hasPlanningTerm || hasCreationVerb));
 };
+
+const WORKFLOW_SUGGESTION_STOP_WORDS = new Set([
+  'about',
+  'after',
+  'again',
+  'also',
+  'and',
+  'app',
+  'application',
+  'are',
+  'build',
+  'can',
+  'could',
+  'create',
+  'complete',
+  'for',
+  'from',
+  'have',
+  'how',
+  'idea',
+  'into',
+  'like',
+  'long',
+  'month',
+  'months',
+  'need',
+  'new',
+  'plan',
+  'planning',
+  'process',
+  'project',
+  'question',
+  'resource',
+  'resources',
+  'study',
+  'take',
+  'template',
+  'that',
+  'the',
+  'this',
+  'time',
+  'what',
+  'will',
+  'with',
+  'workflow',
+  'would',
+]);
+
+const tokenizeWorkflowSuggestionText = (value = '') =>
+  String(value)
+    .toLowerCase()
+    .split(/\W+/)
+    .filter(
+      (word) =>
+        (word.length > 2 || /\d/.test(word)) &&
+        !WORKFLOW_SUGGESTION_STOP_WORDS.has(word) &&
+        !/^\d+$/.test(word)
+    );
+
+const isWorkflowTemplateContent = (item = {}) => {
+  const metadata = item.workflowMetadata || item.workflow_metadata || {};
+  const kind = String(metadata.kind || '').toLowerCase();
+  return (
+    item.type === 'workflow_template' ||
+    kind === 'template' ||
+    kind === 'workflow_template'
+  );
+};
+
+const stripDecorativeEmoji = (value = '') =>
+  String(value)
+    .replace(
+      /[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}]\u{FE0F}?/gu,
+      ''
+    )
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/[ \t]+\n/g, '\n')
+    .trim();
+
+const stripHtmlToPlainText = (value = '') =>
+  sanitizeHtml(String(value || ''), {
+    allowedTags: [],
+    allowedAttributes: {},
+  })
+    .replace(/\u00a0/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+const buildWorkflowTemplateSuggestions = (
+  prompt = '',
+  relevantContent = [],
+  planningContextText = prompt
+) => {
+  if (!isWorkflowPlanningRequest(prompt)) return [];
+
+  const promptTokens = new Set(tokenizeWorkflowSuggestionText(planningContextText));
+  const hasSpecificContext = promptTokens.size > 0;
+
+  return relevantContent
+    .filter(isWorkflowTemplateContent)
+    .map((item) => {
+      const metadata = item.workflowMetadata || item.workflow_metadata || {};
+      const templateText = [
+        item.name || item.title,
+        item.description,
+        metadata.domain,
+        metadata.useCase,
+        metadata.intent,
+        Array.isArray(metadata.tags) ? metadata.tags.join(' ') : metadata.tags,
+      ]
+        .filter(Boolean)
+        .join(' ');
+      const matchedTerms = [
+        ...new Set(
+          tokenizeWorkflowSuggestionText(templateText).filter((token) =>
+            promptTokens.has(token)
+          )
+        ),
+      ].slice(0, 6);
+      const externalLinksCount =
+        Number(item.externalLinksCount ?? item.external_links_count ?? 0) || 0;
+      const similarityScore = Number.parseFloat(
+        item.similarity_score || item.similarity || 0
+      );
+      const baseScore = Number.isFinite(similarityScore) ? similarityScore : 0;
+      const score =
+        baseScore + matchedTerms.length * 0.05 + externalLinksCount / 1000;
+      const reasonParts = [
+        `${item.name || item.title} is a reusable workflow template.`,
+        externalLinksCount > 0
+          ? `It already has ${externalLinksCount} attached step/resource link${externalLinksCount === 1 ? '' : 's'} that can be copied into a project timeline.`
+          : '',
+        matchedTerms.length > 0
+          ? `It overlaps with your request on: ${matchedTerms.join(', ')}.`
+          : 'It was retrieved as a close workflow-planning match for this request.',
+      ].filter(Boolean);
+
+      return {
+        id: item.id,
+        name: item.name || item.title,
+        title: item.title || item.name,
+        description: item.description || '',
+        type: item.type || 'workflow_template',
+        workflowMetadata: metadata,
+        externalLinksCount,
+        similarity: Number.isFinite(baseScore) ? baseScore.toFixed(3) : null,
+        matchScore: Number(score.toFixed(3)),
+        matchedTerms,
+        reason: stripDecorativeEmoji(reasonParts.join(' ')),
+        tenantId: item.tenantId || item.tenant_id || null,
+        workflowFallback: Boolean(item.workflowFallback),
+      };
+    })
+    .filter(
+      (item) =>
+        !hasSpecificContext ||
+        item.matchedTerms.length > 0 ||
+        (!item.workflowFallback && Number(item.similarity || 0) >= 0.85)
+    )
+    .sort((a, b) => b.matchScore - a.matchScore)
+    .slice(0, 5);
+};
+
+const buildWorkflowTemplateSelectionAnswer = (suggestions = []) => {
+  const selected = suggestions[0];
+  if (!selected) return '';
+
+  const title = stripDecorativeEmoji(
+    selected.name || selected.title || 'Workflow template'
+  );
+  const reason = stripDecorativeEmoji(
+    selected.reason ||
+      `${title} was selected because it is the closest reusable workflow template for this request.`
+  );
+  const details = [];
+
+  details.push(
+    `I found an existing workflow template that looks like the best starting point: **${title}**.`
+  );
+  details.push(`It looks relevant because ${reason.charAt(0).toLowerCase()}${reason.slice(1)}`);
+
+  if (selected.matchedTerms?.length) {
+    details.push(
+      `The strongest overlap was: ${selected.matchedTerms.join(', ')}.`
+    );
+  }
+
+  details.push(
+    'Use **Review template** to inspect the suggested steps and attached resources before creating your project copy.'
+  );
+
+  return stripDecorativeEmoji(details.join('\n\n'));
+};
+
+const getPlanSuggestionContentType = (item = {}) =>
+  String(item.content_type || item.search_type || item.type || '').toLowerCase();
+
+const getPlanSuggestionSimilarity = (item = {}) => {
+  const value = Number.parseFloat(item.similarity_score || item.similarity || 0);
+  return Number.isFinite(value) ? value : 0;
+};
+
+const buildPlanningContextText = (
+  prompt = '',
+  collectionData = {},
+  conversationHistory = []
+) => {
+  const whiteboardText = [
+    collectionData.other?.whiteboardContext,
+    ...(Array.isArray(collectionData.other?.whiteboards)
+      ? collectionData.other.whiteboards.flatMap((whiteboard) => [
+          whiteboard?.summary,
+          ...(Array.isArray(whiteboard?.elements)
+            ? whiteboard.elements
+                .map((element) => element?.text)
+                .filter(Boolean)
+            : []),
+        ])
+      : []),
+  ]
+    .filter(Boolean)
+    .join('\n');
+  const recentPromptText = Array.isArray(conversationHistory)
+    ? conversationHistory
+        .slice(-3)
+        .map((entry) => entry?.prompt || '')
+        .filter(Boolean)
+        .join('\n')
+    : '';
+
+  return [whiteboardText, prompt, recentPromptText].filter(Boolean).join('\n\n');
+};
+
+const getPlanContextTokens = (contextText = '') => [
+  ...new Set(tokenizeWorkflowSuggestionText(contextText)),
+];
+
+const countPlanContextMatches = (item = {}, contextTokens = []) => {
+  const tokenSet = new Set(contextTokens);
+  if (tokenSet.size === 0) return [];
+
+  const metadata = item.workflowMetadata || item.workflow_metadata || {};
+  const searchableText = [
+    item.name || item.title,
+    item.description,
+    item.notes,
+    item.fullText,
+    Array.isArray(item.hashtags) ? item.hashtags.join(' ') : item.hashtags,
+    metadata.domain,
+    metadata.useCase,
+    metadata.intent,
+    Array.isArray(metadata.tags) ? metadata.tags.join(' ') : metadata.tags,
+  ]
+    .filter(Boolean)
+    .join(' ');
+
+  return [
+    ...new Set(
+      tokenizeWorkflowSuggestionText(searchableText).filter((token) =>
+        tokenSet.has(token)
+      )
+    ),
+  ];
+};
+
+const buildRetrievedContentSelectionReason = (item = {}, matchedTerms = []) => {
+  const explicitReason = stripDecorativeEmoji(
+    stripHtmlToPlainText(
+      item.selectionReason ||
+        item.selection_reason ||
+        item.reason ||
+        item.rationale ||
+        item.matchReason ||
+        item.match_reason ||
+        ''
+    )
+  );
+
+  if (explicitReason) return explicitReason;
+
+  const similarity = getPlanSuggestionSimilarity(item);
+  const typeLabel = (getPlanSuggestionContentType(item) || 'item').replace(
+    /_/g,
+    ' '
+  );
+
+  if (similarity >= 1) {
+    return 'The user explicitly selected or mentioned this item for the chat.';
+  }
+
+  if (matchedTerms.length > 0) {
+    return `It matched the request on: ${matchedTerms.slice(0, 6).join(', ')}.`;
+  }
+
+  if (similarity > 0) {
+    return `It was retrieved as a semantic ${typeLabel} match for this question.`;
+  }
+
+  return 'It was included as supporting context for the AI response.';
+};
+
+const buildTokenSearchClause = (tableAlias, tokens = []) => {
+  const searchableTokens = tokens.slice(0, 12);
+  if (searchableTokens.length === 0) return null;
+
+  const columns =
+    tableAlias === 'resources'
+      ? [
+          sql`LOWER(r.name)`,
+          sql`LOWER(COALESCE(r.description, ''))`,
+          sql`LOWER(COALESCE(r.full_text, ''))`,
+        ]
+      : tableAlias === 'external_links'
+        ? [
+            sql`LOWER(el.name)`,
+            sql`LOWER(COALESCE(el.description, ''))`,
+            sql`LOWER(COALESCE(el.notes, ''))`,
+            sql`LOWER(COALESCE(el.full_text, ''))`,
+          ]
+        : [
+            sql`LOWER(c.name)`,
+            sql`LOWER(COALESCE(c.description, ''))`,
+            sql`LOWER(COALESCE(c.hashtags, ''))`,
+          ];
+
+  return sql.join(
+    searchableTokens.flatMap((token) => {
+      const pattern = `%${token.toLowerCase()}%`;
+      return columns.map((column) => sql`${column} LIKE ${pattern}`);
+    }),
+    sql` OR `
+  );
+};
+
+const getTextMatchedPlanContent = async (
+  userId,
+  tenantIds = [],
+  contextTokens = []
+) => {
+  if (!tenantIds?.length || contextTokens.length === 0) return [];
+
+  const tenantSql = sql.join(
+    tenantIds.map((id) => sql`${id}::uuid`),
+    sql`, `
+  );
+  const resourceMatchClause = buildTokenSearchClause('resources', contextTokens);
+  const collectionMatchClause = buildTokenSearchClause(
+    'collections',
+    contextTokens
+  );
+  const externalLinkMatchClause = buildTokenSearchClause(
+    'external_links',
+    contextTokens
+  );
+  const results = [];
+
+  if (resourceMatchClause) {
+    const resourceMatches = await db.execute(sql`
+      SELECT
+        r.id,
+        r.name,
+        r.description,
+        r.url,
+        r.tenant_id,
+        r.created_at,
+        r.updated_at,
+        'resource' as content_type,
+        'resource' as search_type,
+        0.98 as similarity_score
+      FROM resources r
+      WHERE
+        r.tenant_id = ANY(ARRAY[${tenantSql}])
+        AND r.status = 'approved'
+        AND (${resourceMatchClause})
+      ORDER BY r.updated_at DESC
+      LIMIT 12
+    `);
+    results.push(...resourceMatches.rows);
+  }
+
+  if (collectionMatchClause) {
+    const collectionMatches = await db.execute(sql`
+      SELECT
+        c.id,
+        c.name,
+        c.description,
+        c.type,
+        c.visibility,
+        c.start_date,
+        c.end_date,
+        c.source_template_id,
+        c.workflow_metadata,
+        c.tenant_id,
+        c.created_at,
+        c.updated_at,
+        'collection' as content_type,
+        'collection' as search_type,
+        0.96 as similarity_score
+      FROM collections c
+      LEFT JOIN collection_collaborators cc
+        ON cc.collection_id = c.id AND cc.user_id = ${userId}
+      WHERE
+        c.tenant_id = ANY(ARRAY[${tenantSql}])
+        AND (${collectionMatchClause})
+        AND (
+          c.visibility = 'public'
+          OR c.visibility = 'unlisted'
+          OR c.user_id = ${userId}
+          OR cc.id IS NOT NULL
+        )
+      ORDER BY c.updated_at DESC
+      LIMIT 12
+    `);
+    results.push(
+      ...collectionMatches.rows.map((row) => ({
+        ...row,
+        workflowMetadata: row.workflow_metadata,
+      }))
+    );
+  }
+
+  if (externalLinkMatchClause) {
+    const externalLinkMatches = await db.execute(sql`
+      SELECT
+        el.id,
+        el.name,
+        el.description,
+        el.url,
+        el.type,
+        el.visibility,
+        el.tenant_id,
+        el.created_at,
+        el.updated_at,
+        'external_link' as content_type,
+        'external_link' as search_type,
+        0.97 as similarity_score
+      FROM external_links el
+      WHERE
+        el.tenant_id = ANY(ARRAY[${tenantSql}])
+        AND (${externalLinkMatchClause})
+        AND (
+          el.visibility = 'public'
+          OR el.added_by_user_id = ${userId}
+          OR EXISTS (
+            SELECT 1
+            FROM collection_external_links cel
+            JOIN collections c ON c.id = cel.collection_id
+            LEFT JOIN collection_collaborators cc
+              ON cc.collection_id = c.id AND cc.user_id = ${userId}
+            WHERE cel.external_link_id = el.id
+              AND (c.user_id = ${userId} OR cc.id IS NOT NULL)
+          )
+        )
+      ORDER BY el.updated_at DESC
+      LIMIT 12
+    `);
+    results.push(...externalLinkMatches.rows);
+  }
+
+  return results;
+};
+
+const normalizeCollectionPlanItem = (item = {}, promptTokens = new Set()) => {
+  const contentType = getPlanSuggestionContentType(item);
+  const metadata = item.workflowMetadata || item.workflow_metadata || {};
+  const name =
+    stripHtmlToPlainText(item.name || item.title || '') || 'Untitled item';
+  const description = stripHtmlToPlainText(item.description || item.notes || '');
+  const searchableText = [
+    name,
+    description,
+    Array.isArray(item.hashtags) ? item.hashtags.join(' ') : item.hashtags,
+    metadata.domain,
+    metadata.useCase,
+    metadata.intent,
+    Array.isArray(metadata.tags) ? metadata.tags.join(' ') : metadata.tags,
+  ]
+    .filter(Boolean)
+    .join(' ');
+  const matchedTerms = [
+    ...new Set(
+      tokenizeWorkflowSuggestionText(searchableText).filter((token) =>
+        promptTokens.has(token)
+      )
+    ),
+  ].slice(0, 6);
+  const similarity = getPlanSuggestionSimilarity(item);
+
+  return {
+    id: item.id,
+    name,
+    title: stripHtmlToPlainText(item.title || item.name || '') || name,
+    description,
+    type: contentType || 'resource',
+    url: item.url || null,
+    collectionExternalLinkId:
+      item.collectionExternalLinkId ||
+      item.collection_external_link_id ||
+      item.associationId ||
+      null,
+    sourceCollectionId:
+      item.sourceCollectionId || item.source_collection_id || item.collectionId || null,
+    startDate: item.startDate || item.start_date || item.date || null,
+    endDate: item.endDate || item.end_date || item.startDate || item.start_date || item.date || null,
+    sortOrder: item.sortOrder || item.sort_order || null,
+    tenantId: item.tenantId || item.tenant_id || null,
+    similarity: similarity ? similarity.toFixed(3) : null,
+    matchScore: Number((similarity + matchedTerms.length * 0.2).toFixed(3)),
+    matchedTerms,
+    selectionReason: buildRetrievedContentSelectionReason(item, matchedTerms),
+    workflowMetadata: metadata,
+    externalLinksCount:
+      Number(item.externalLinksCount ?? item.external_links_count ?? 0) || 0,
+  };
+};
+
+const buildCollectionPlanSuggestion = (
+  prompt = '',
+  relevantContent = [],
+  workflowTemplateSuggestions = [],
+  planningContextText = prompt
+) => {
+  if (!isWorkflowPlanningRequest(prompt)) return null;
+
+  const contextTokens = getPlanContextTokens(planningContextText);
+  const promptTokens = new Set(contextTokens);
+  const hasSpecificContext = contextTokens.length > 0;
+  const byIdAndType = new Set();
+  const uniqueContent = relevantContent.filter((item) => {
+    if (!item?.id) return false;
+    if (getPlanSuggestionContentType(item) === 'whiteboard') return false;
+    const key = `${getPlanSuggestionContentType(item)}:${item.id}`;
+    if (byIdAndType.has(key)) return false;
+    byIdAndType.add(key);
+    return true;
+  });
+  const isRelevantItem = (item) => {
+    if (!hasSpecificContext) return true;
+    const similarity = getPlanSuggestionSimilarity(item);
+    const matchedTerms = countPlanContextMatches(item, contextTokens);
+    if (isWorkflowTemplateContent(item)) {
+      return matchedTerms.length > 0 || (!item.workflowFallback && similarity >= 0.9);
+    }
+    return matchedTerms.length > 0 || similarity >= 0.7;
+  };
+
+  const collections = uniqueContent
+    .filter((item) => {
+      const type = getPlanSuggestionContentType(item);
+      return type === 'collection' || isWorkflowTemplateContent(item);
+    })
+    .filter(isRelevantItem)
+    .map((item) => normalizeCollectionPlanItem(item, promptTokens))
+    .sort((a, b) => {
+      const matchDelta = b.matchedTerms.length - a.matchedTerms.length;
+      if (matchDelta !== 0) return matchDelta;
+      return b.matchScore - a.matchScore;
+    })
+    .slice(0, 5);
+
+  const resources = uniqueContent
+    .filter((item) => getPlanSuggestionContentType(item) === 'resource')
+    .filter(isRelevantItem)
+    .map((item) => normalizeCollectionPlanItem(item, promptTokens))
+    .sort((a, b) => {
+      const matchDelta = b.matchedTerms.length - a.matchedTerms.length;
+      if (matchDelta !== 0) return matchDelta;
+      return b.matchScore - a.matchScore;
+    })
+    .slice(0, 8);
+
+  const externalLinks = uniqueContent
+    .filter((item) => getPlanSuggestionContentType(item) === 'external_link')
+    .filter(isRelevantItem)
+    .map((item) => normalizeCollectionPlanItem(item, promptTokens))
+    .sort((a, b) => {
+      const matchDelta = b.matchedTerms.length - a.matchedTerms.length;
+      if (matchDelta !== 0) return matchDelta;
+      return b.matchScore - a.matchScore;
+    })
+    .slice(0, 8);
+
+  const templates = workflowTemplateSuggestions
+    .filter(
+      (template) =>
+        !hasSpecificContext ||
+        template.matchedTerms?.length > 0
+    )
+    .slice(0, 5);
+  const selectedTemplate = templates[0] || collections.find(isWorkflowTemplateContent);
+
+  const title = selectedTemplate
+    ? selectedTemplate.name || selectedTemplate.title
+    : 'Suggested collection plan';
+  const summaryParts = [
+    collections.length
+      ? `${collections.length} relevant collection${collections.length === 1 ? '' : 's'}`
+      : '',
+    externalLinks.length
+      ? `${externalLinks.length} external link${externalLinks.length === 1 ? '' : 's'}`
+      : '',
+  ].filter(Boolean);
+
+  return {
+    prompt,
+    title,
+    summary: summaryParts.length
+      ? `I found ${summaryParts.join(' and ')} that can seed this plan.`
+      : 'I did not find a strong existing match yet. Search external links and collections to build this project collection.',
+    templates,
+    selectedTemplateId: selectedTemplate?.id || null,
+    collections,
+    externalLinks,
+    resources: [],
+    collectionCount: collections.length,
+    externalLinkCount: externalLinks.length,
+    resourceCount: 0,
+    hasWorkflowTemplate: templates.length > 0,
+    reason:
+      selectedTemplate?.reason ||
+      collections[0]?.description ||
+      externalLinks[0]?.description ||
+      'These items were retrieved as planning matches for the prompt.',
+  };
+};
+
+const buildCollectionPlanSuggestionAnswer = (suggestion) => {
+  if (!suggestion) return '';
+
+  const details = [
+    suggestion.summary ||
+      'I found suggested collections and external links that can seed this plan.',
+    'Use the collection builder below to select external links, inspect matching collections, and create the project collection.',
+  ];
+
+  return stripDecorativeEmoji(details.join('\n\n'));
+};
+
+const buildNoCollectionPlanSuggestionAnswer = () =>
+  'I did not find a strong existing external link or collection match yet. Use the collection builder search to add external links or inspect collections before creating the project collection.';
 
 const getWorkflowTemplateContext = async (userId, tenantIds = []) => {
   if (!tenantIds?.length) return [];
@@ -1091,7 +1773,8 @@ const getWorkflowTemplateContext = async (userId, tenantIds = []) => {
     type: row.type,
     content_type: 'collection',
     search_type: 'collection',
-    similarity_score: '0.995',
+    similarity_score: '0.35',
+    workflowFallback: true,
     startDate: row.start_date,
     endDate: row.end_date,
     sourceTemplateId: row.source_template_id,
@@ -1242,6 +1925,21 @@ const mapLiteLLMModelName = (modelName) => {
   return requestedModel || configuredDefault || 'gpt-4o-mini';
 };
 
+export const getChatModelStatusLabel = (modelName) => {
+  if (!shouldUseLiteLLM()) {
+    return String(modelName || MODEL_NAMES.GEMINI_FLASH);
+  }
+
+  const mappedModel = mapLiteLLMModelName(modelName);
+  const provider = String(process.env.LLM_GATEWAY || process.env.LLM_PROVIDER)
+    .toLowerCase()
+    .includes('openai-compatible')
+    ? 'local model'
+    : 'LLM gateway model';
+
+  return `${provider} ${mappedModel}`;
+};
+
 const makeLiteLLMChatRequest = async ({
   prompt,
   systemPrompt,
@@ -1258,8 +1956,7 @@ const makeLiteLLMChatRequest = async ({
     );
   }
 
-  const path =
-    process.env.LITELLM_CHAT_COMPLETIONS_PATH || 'chat/completions';
+  const path = process.env.LITELLM_CHAT_COMPLETIONS_PATH || 'chat/completions';
   const headers = {
     'Content-Type': 'application/json',
   };
@@ -1387,9 +2084,7 @@ const makeStructuredAiRequest = async ({
   if (!response.ok) {
     const errorText = await response.text();
     console.error(`${serviceName} error response:`, errorText);
-    throw new Error(
-      `${serviceName} responded with status: ${response.status}`
-    );
+    throw new Error(`${serviceName} responded with status: ${response.status}`);
   }
 
   const result = await response.json();
@@ -2275,6 +2970,12 @@ export const generateChatWithAiAgents = async (
     ].some((arr) => arr && arr.length > 0);
 
     const isWorkflowPlanning = isWorkflowPlanningRequest(prompt);
+    const planningContextText = isWorkflowPlanning
+      ? buildPlanningContextText(prompt, collectionData, conversationHistory)
+      : prompt;
+    const planningContextTokens = isWorkflowPlanning
+      ? getPlanContextTokens(planningContextText)
+      : [];
 
     // NEW: Perform semantic search on all content types based on user prompt ONLY if RAG is not disabled
     let relevantContent = [];
@@ -2306,7 +3007,12 @@ export const generateChatWithAiAgents = async (
         const userEmail = userResult.rows[0]?.email;
 
         const searchPrompt = isWorkflowPlanning
-          ? `${prompt}\n\nAlso search for workflow templates, project plans, app development process steps, implementation timelines, IT intake, development environment setup, approvals, testing, security, deployment, and reusable build process collections.`
+          ? [
+              planningContextText,
+              'Find existing collections and resources that directly match the named project steps, approvals, deliverables, timing, and constraints above.',
+            ]
+              .filter(Boolean)
+              .join('\n\n')
           : prompt;
 
         // Use the new performSemanticSearch with built-in negation handling
@@ -2335,19 +3041,45 @@ export const generateChatWithAiAgents = async (
         // Continue with normal search processing
         relevantContent = searchResult.results || [];
         if (isWorkflowPlanning) {
+          const textMatchedContent = await getTextMatchedPlanContent(
+            userId,
+            tenants,
+            planningContextTokens
+          );
           const workflowTemplateContext = await getWorkflowTemplateContext(
             userId,
             tenants
           );
+          const matchedWorkflowTemplates = workflowTemplateContext.filter(
+            (template) =>
+              countPlanContextMatches(template, planningContextTokens).length > 0
+          );
           relevantContent = mergeRelevantContent(
-            workflowTemplateContext,
+            textMatchedContent,
+            matchedWorkflowTemplates,
             relevantContent
           );
         }
       } catch (error) {
         console.error('Vector search failed, continuing without RAG:', error);
         if (isWorkflowPlanning) {
-          relevantContent = await getWorkflowTemplateContext(userId, tenants);
+          const textMatchedContent = await getTextMatchedPlanContent(
+            userId,
+            tenants,
+            planningContextTokens
+          );
+          const workflowTemplateContext = await getWorkflowTemplateContext(
+            userId,
+            tenants
+          );
+          const matchedWorkflowTemplates = workflowTemplateContext.filter(
+            (template) =>
+              countPlanContextMatches(template, planningContextTokens).length > 0
+          );
+          relevantContent = mergeRelevantContent(
+            textMatchedContent,
+            matchedWorkflowTemplates
+          );
         }
       }
     } else if (hasMentionedItems) {
@@ -2606,6 +3338,55 @@ export const generateChatWithAiAgents = async (
       }
     }
 
+    if (isWorkflowPlanning && (hasMentionedItems || hasSelectedItems || disableRAG)) {
+      try {
+        const textMatchedContent = await getTextMatchedPlanContent(
+          userId,
+          tenants,
+          planningContextTokens
+        );
+        const workflowTemplateContext = await getWorkflowTemplateContext(
+          userId,
+          tenants
+        );
+        const matchedWorkflowTemplates = workflowTemplateContext.filter(
+          (template) =>
+            countPlanContextMatches(template, planningContextTokens).length > 0
+        );
+        relevantContent = mergeRelevantContent(
+          relevantContent,
+          textMatchedContent,
+          matchedWorkflowTemplates
+        );
+      } catch (error) {
+        console.error('Workflow template context lookup failed:', error);
+      }
+    }
+
+    const whiteboardContexts = Array.isArray(collectionData.other?.whiteboards)
+      ? collectionData.other.whiteboards
+      : [];
+
+    if (whiteboardContexts.length > 0) {
+      relevantContent = [
+        ...relevantContent,
+        ...whiteboardContexts.map((whiteboard, index) => ({
+          id: whiteboard.id || `chat-whiteboard-${index + 1}`,
+          title: whiteboard.title || 'Chat whiteboard',
+          description:
+            whiteboard.summary ||
+            'A freeform whiteboard was attached to this chat request.',
+          content_type: 'whiteboard',
+          search_type: 'whiteboard',
+          similarity_score: '1.000',
+          elements: Array.isArray(whiteboard.elements)
+            ? whiteboard.elements
+            : [],
+          attachments: whiteboard.attachments || {},
+        })),
+      ];
+    }
+
     const systemPrompt = generateStreamlinedSystemPrompt(
       details,
       'collections',
@@ -2626,13 +3407,15 @@ export const generateChatWithAiAgents = async (
       maxTokens: 8000,
     });
 
-    const responseText = extractAiResponseText(chatResponse);
+    let responseText = stripDecorativeEmoji(extractAiResponseText(chatResponse));
     const referencedIdsFromText = new Set(
       String(responseText).match(
         /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi
       ) || []
     );
-    const retrievedIds = new Set(relevantContent.map((item) => String(item.id)));
+    const retrievedIds = new Set(
+      relevantContent.map((item) => String(item.id))
+    );
     const textReferences = Array.from(referencedIdsFromText).filter((id) =>
       retrievedIds.has(String(id))
     );
@@ -2648,19 +3431,82 @@ export const generateChatWithAiAgents = async (
             return refs;
           }, {});
 
+    const workflowTemplateSuggestions = buildWorkflowTemplateSuggestions(
+      prompt,
+      relevantContent,
+      planningContextText
+    );
+    const collectionPlanSuggestion = buildCollectionPlanSuggestion(
+      prompt,
+      relevantContent,
+      workflowTemplateSuggestions,
+      planningContextText
+    );
+
+    if (collectionPlanSuggestion) {
+      const planSelectionAnswer = buildCollectionPlanSuggestionAnswer(
+        collectionPlanSuggestion
+      );
+
+      responseText = planSelectionAnswer;
+      chatResponse.answer = planSelectionAnswer;
+      chatResponse.response = planSelectionAnswer;
+      if (chatResponse.content && typeof chatResponse.content === 'object') {
+        chatResponse.content.answer = planSelectionAnswer;
+      }
+    } else if (isWorkflowPlanning) {
+      const noPlanSuggestionAnswer = buildNoCollectionPlanSuggestionAnswer();
+
+      responseText = noPlanSuggestionAnswer;
+      chatResponse.answer = noPlanSuggestionAnswer;
+      chatResponse.response = noPlanSuggestionAnswer;
+      if (chatResponse.content && typeof chatResponse.content === 'object') {
+        chatResponse.content.answer = noPlanSuggestionAnswer;
+      }
+    } else if (responseText) {
+      chatResponse.answer = stripDecorativeEmoji(chatResponse.answer || responseText);
+      chatResponse.response = stripDecorativeEmoji(
+        chatResponse.response || responseText
+      );
+    }
+
     // NEW: Add metadata about retrieved content
     if (relevantContent.length > 0) {
-      chatResponse.retrievedContent = relevantContent.map((item) => ({
-        id: item.id,
-        title: item.title || item.name,
-        type: item.content_type || item.search_type || 'resource',
-        similarity: parseFloat(
-          item.similarity_score || item.similarity
-        ).toFixed(3),
-        description: item.description || item.notes || '',
-        url: item.url || null,
-        tenantId: item.tenant_id || null,
-      }));
+      const retrievedContentContextTokens = getPlanContextTokens(
+        planningContextText || prompt
+      );
+
+      chatResponse.retrievedContent = relevantContent.map((item) => {
+        const matchedTerms = countPlanContextMatches(
+          item,
+          retrievedContentContextTokens
+        ).slice(0, 6);
+
+        return {
+          id: item.id,
+          title: item.title || item.name,
+          type: item.content_type || item.search_type || 'resource',
+          similarity: parseFloat(
+            item.similarity_score || item.similarity
+          ).toFixed(3),
+          description: item.description || item.notes || '',
+          url: item.url || null,
+          tenantId: item.tenant_id || null,
+          matchedTerms,
+          selectionReason: buildRetrievedContentSelectionReason(
+            item,
+            matchedTerms
+          ),
+        };
+      });
+    }
+
+    if (workflowTemplateSuggestions.length > 0) {
+      chatResponse.workflowTemplateSuggestions = workflowTemplateSuggestions;
+    }
+
+    if (collectionPlanSuggestion) {
+      chatResponse.collectionPlanSuggestion = collectionPlanSuggestion;
     }
 
     return {
@@ -2720,7 +3566,7 @@ const generateStreamlinedSystemPrompt = (
   return [
     'You are a helful medical and research AI assistant on a mission to help find the best resources and to combat misinformation. Follow these rules strictly:',
     isWorkflowPlanning
-      ? 'WORKFLOW PLANNING MODE: The user is asking how to bring an app, system, tool, or project idea to life. Search and reason over workflow template collections and referenced resources. If a workflow template collection is relevant, mention it by name, explain why it fits, and include its exact ID in the final references so the UI can offer a project creation workflow.'
+      ? 'WORKFLOW TEMPLATE SELECTION MODE: The user is asking how to bring an app, system, tool, or project idea to life. Search and reason over workflow template collections and referenced resources. If a workflow template collection is relevant, do not write a project plan, task list, implementation guide, or timeline in the chat answer. Only explain why the selected template is a good fit, based on the retrieved template metadata and attached resources. Keep this explanation short. Include the exact template ID in the final references so the UI can offer the project creation workflow.'
       : '',
     '1. Your response should contain human-readable content explaining why the data was selected',
     '2. We need ids from everything that you are referencing in your answer at the end, this should be a comma separated list of id after a colon at the very end of your full response, DO NOT PUT IT inline. Never return something like Resources ID: - you should strickly follow the format we have provided.',
@@ -2740,9 +3586,10 @@ const generateStreamlinedSystemPrompt = (
     '14. If the user tells you their location, use that to personalize the response and if making recommendations for events, let them know that the event is local to them. If the event is further away and not a conference, summit or similar event, let them know that it is not local to them.',
     '15. If you are referencing an attachment, you should ALWAYS return the id of the attachment separate from the externalLinkId.',
     '16. If you find the answer in a video with timestamps, you should let the user know the timestamp of the answer in your response.',
+    '17. Do not use emoji, decorative icons, pictographs, or symbol bullets in any answer. Use plain markdown only.',
     hasMentionedItems
-      ? '17. IMPORTANT: The user has specifically mentioned certain items in their request. Focus primarily on these mentioned items as they are the main subject of inquiry.'
-      : '17. The content provided was discovered through semantic search based on relevance to your question.',
+      ? '18. IMPORTANT: The user has specifically mentioned certain items in their request. Focus primarily on these mentioned items as they are the main subject of inquiry.'
+      : '18. The content provided was discovered through semantic search based on relevance to your question.',
     'Example format:',
     'Here are some resources that may be helpful, x may be helpful because, y may be helpful because, z may be helpful because.... then include the ids of the resources that were referenced in this format uuid, uuid, uuid at the end of your complete response. Bullet lists with short sentences are best unless building tables, or writing content for the user.',
     'If asked about resources for patients like them, also look for support groups, resources or resources that help them connect with others',
@@ -2853,9 +3700,8 @@ export const generateStructuredNotationsService = async (
 ) => {
   try {
     // Import the tag service
-    const { getUserTagsService } = await import(
-      './collectionExternalLinkTagsService.js'
-    );
+    const { getUserTagsService } =
+      await import('./collectionExternalLinkTagsService.js');
 
     // Fetch available tags for the user
     let availableTags = [];
@@ -3934,9 +4780,8 @@ export const generateBulkNotationUpdatesService = async (
 ) => {
   try {
     // Import the tag service
-    const { getUserTagsService } = await import(
-      './collectionExternalLinkTagsService.js'
-    );
+    const { getUserTagsService } =
+      await import('./collectionExternalLinkTagsService.js');
 
     // Fetch available tags for the user
     let availableTags = [];
@@ -4227,7 +5072,10 @@ export const searchUnifiedService = async (
   }
 };
 
-const EXTERNAL_LINK_PLACEHOLDER_HOSTS = new Set(['example.com', 'www.example.com']);
+const EXTERNAL_LINK_PLACEHOLDER_HOSTS = new Set([
+  'example.com',
+  'www.example.com',
+]);
 
 const normalizeExternalLinkAiText = (value = '') =>
   String(value || '')

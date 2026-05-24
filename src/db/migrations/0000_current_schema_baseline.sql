@@ -12,7 +12,7 @@ CREATE EXTENSION IF NOT EXISTS vector;
 
 CREATE TABLE IF NOT EXISTS sensitivity_levels (
     id serial PRIMARY KEY,
-    name varchar(136),
+    name varchar(136) NOT NULL,
     description text,
     created_at timestamp DEFAULT CURRENT_TIMESTAMP,
     updated_at timestamp DEFAULT CURRENT_TIMESTAMP
@@ -44,8 +44,6 @@ CREATE TABLE IF NOT EXISTS users (
     subscription_status varchar(20) DEFAULT 'active'::varchar NOT NULL,
     subscription_start_date timestamp DEFAULT now(),
     subscription_end_date timestamp,
-    stripe_customer_id varchar(100),
-    stripe_subscription_id varchar(100),
     has_onboarded boolean DEFAULT false NOT NULL,
     phone_number varchar(20),
     superuser boolean DEFAULT false NOT NULL
@@ -119,11 +117,7 @@ CREATE TABLE IF NOT EXISTS credit_transactions (
     amount integer NOT NULL,
     reference_id integer,
     description text,
-    stripe_transaction_id varchar(255),
     created_at timestamp with time zone DEFAULT now(),
-    receipt_url text,
-    payment_status varchar(50),
-    payment_amount integer,
     currency varchar(3) DEFAULT 'usd'::varchar
 );
 
@@ -213,7 +207,8 @@ CREATE TABLE IF NOT EXISTS organizations (
     description_embedding vector(1536),
     category_embedding vector(1536),
     combined_embedding vector(1536),
-    vector_updated_at timestamp
+    vector_updated_at timestamp,
+    CONSTRAINT organizations_name_not_blank CHECK (length(trim(name)) > 0)
 );
 
 CREATE TABLE IF NOT EXISTS events (
@@ -257,8 +252,7 @@ CREATE TABLE IF NOT EXISTS events (
     has_sponsorship boolean DEFAULT false,
     visibility varchar(50) DEFAULT 'public'::varchar NOT NULL,
     tenant_id uuid REFERENCES tenants,
-    professional boolean DEFAULT false,
-    is_google_calendar_event boolean DEFAULT false
+    professional boolean DEFAULT false
 );
 
 CREATE TABLE IF NOT EXISTS resource_types (
@@ -608,7 +602,6 @@ CREATE TABLE IF NOT EXISTS external_links (
     timestamps_embedding vector(1536),
     combined_embedding vector(1536),
     vector_updated_at timestamp,
-    is_google_calendar_event boolean DEFAULT false,
     hashtags text,
     allow_public_notations boolean DEFAULT false,
     whiteboard_data jsonb
@@ -889,9 +882,7 @@ CREATE TABLE IF NOT EXISTS subscription_plans (
     is_active boolean DEFAULT true,
     sort_order integer DEFAULT 0,
     created_at timestamp DEFAULT now(),
-    updated_at timestamp DEFAULT now(),
-    stripe_product_id varchar(100),
-    stripe_price_id varchar(100)
+    updated_at timestamp DEFAULT now()
 );
 
 CREATE TABLE IF NOT EXISTS pending_invitations (
@@ -951,52 +942,6 @@ CREATE TABLE IF NOT EXISTS collection_type_ordering (
 );
 
 COMMENT ON TABLE collection_type_ordering IS 'Stores custom sort order for external link types within collections';
-
-CREATE TABLE IF NOT EXISTS google_calendar_integrations (
-    id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
-    user_id uuid NOT NULL UNIQUE REFERENCES users,
-    google_account_email varchar(255) NOT NULL,
-    access_token text NOT NULL,
-    refresh_token text NOT NULL,
-    token_expires_at timestamp with time zone NOT NULL,
-    is_active boolean DEFAULT true,
-    sync_enabled boolean DEFAULT true,
-    primary_calendar_id varchar(255),
-    selected_calendar_ids jsonb DEFAULT '[]'::jsonb,
-    last_synced_at timestamp with time zone,
-    sync_direction varchar(20) DEFAULT 'both'::varchar,
-    created_at timestamp DEFAULT now(),
-    updated_at timestamp DEFAULT now()
-);
-
-CREATE TABLE IF NOT EXISTS google_calendar_events (
-    id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
-    entity_type varchar(50) NOT NULL,
-    entity_id uuid NOT NULL,
-    google_event_id varchar(255) NOT NULL,
-    google_calendar_id varchar(255) NOT NULL,
-    integration_id uuid NOT NULL REFERENCES google_calendar_integrations,
-    sync_status varchar(20) DEFAULT 'synced'::varchar,
-    last_synced_at timestamp with time zone DEFAULT now(),
-    google_event_data jsonb,
-    sync_direction varchar(20) NOT NULL,
-    created_at timestamp DEFAULT now(),
-    updated_at timestamp DEFAULT now(),
-    UNIQUE (entity_type, entity_id, integration_id),
-    CONSTRAINT unique_google_event_per_integration UNIQUE (google_event_id, integration_id, entity_type)
-);
-
-CREATE TABLE IF NOT EXISTS google_calendar_sync_logs (
-    id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
-    integration_id uuid NOT NULL REFERENCES google_calendar_integrations,
-    sync_type varchar(20) NOT NULL,
-    status varchar(20) NOT NULL,
-    events_processed jsonb DEFAULT '{"deleted": 0, "updated": 0, "exported": 0, "imported": 0}'::jsonb,
-    errors jsonb DEFAULT '[]'::jsonb,
-    started_at timestamp with time zone DEFAULT now(),
-    completed_at timestamp with time zone,
-    created_at timestamp DEFAULT now()
-);
 
 CREATE TABLE IF NOT EXISTS collection_merges (
     id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
@@ -1116,7 +1061,6 @@ CREATE TABLE IF NOT EXISTS collection_external_links_notations (
     category_embedding vector(1536),
     combined_embedding vector(1536),
     vector_updated_at timestamp,
-    is_google_calendar_event boolean DEFAULT false,
     template_id uuid REFERENCES notation_templates ON DELETE SET NULL,
     custom_fields jsonb DEFAULT '{}'::jsonb,
     submission_metadata jsonb DEFAULT '{}'::jsonb,
@@ -1431,8 +1375,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS resource_attachments_resource_attachment_uniqu
 CREATE INDEX IF NOT EXISTS idx_users_email ON users (email);
 CREATE INDEX IF NOT EXISTS idx_users_names ON users (last_name, first_name);
 CREATE INDEX IF NOT EXISTS idx_users_subscription_plan ON users (subscription_plan);
-CREATE INDEX IF NOT EXISTS idx_users_stripe_customer ON users (stripe_customer_id);
-CREATE INDEX IF NOT EXISTS idx_users_stripe_subscription ON users (stripe_subscription_id);
 CREATE INDEX IF NOT EXISTS idx_users_phone_number ON users (phone_number);
 CREATE INDEX IF NOT EXISTS idx_credit_transactions_user ON credit_transactions (user_id);
 CREATE INDEX IF NOT EXISTS idx_event_types_tenant_id ON event_types (tenant_id);
@@ -1578,8 +1520,6 @@ CREATE INDEX IF NOT EXISTS idx_pinned_items_type ON pinned_items (item_type);
 CREATE INDEX IF NOT EXISTS idx_pinned_items_order ON pinned_items (order_position);
 CREATE INDEX IF NOT EXISTS idx_subscription_plans_name ON subscription_plans (name);
 CREATE INDEX IF NOT EXISTS idx_subscription_plans_active_sort ON subscription_plans (is_active, sort_order);
-CREATE INDEX IF NOT EXISTS idx_subscription_plans_stripe_product ON subscription_plans (stripe_product_id);
-CREATE INDEX IF NOT EXISTS idx_subscription_plans_stripe_price ON subscription_plans (stripe_price_id);
 CREATE INDEX IF NOT EXISTS idx_pending_invitations_email ON pending_invitations (email);
 CREATE INDEX IF NOT EXISTS idx_pending_invitations_token ON pending_invitations (invite_token);
 CREATE INDEX IF NOT EXISTS idx_pending_invitations_status ON pending_invitations (status);
@@ -1592,11 +1532,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_collection_external_link_tag_definitions_u
 CREATE INDEX IF NOT EXISTS idx_collection_external_link_tags_link_id ON collection_external_link_tags (collection_external_link_id);
 CREATE INDEX IF NOT EXISTS idx_collection_external_link_tags_tag_id ON collection_external_link_tags (tag_id);
 CREATE UNIQUE INDEX IF NOT EXISTS collection_type_ordering_collection_type_unique ON collection_type_ordering (collection_id, type);
-CREATE INDEX IF NOT EXISTS idx_google_calendar_integrations_user_id ON google_calendar_integrations (user_id);
-CREATE INDEX IF NOT EXISTS idx_google_calendar_events_entity ON google_calendar_events (entity_type, entity_id);
-CREATE INDEX IF NOT EXISTS idx_google_calendar_events_integration_id ON google_calendar_events (integration_id);
-CREATE INDEX IF NOT EXISTS idx_google_calendar_events_lookup ON google_calendar_events (google_event_id, integration_id, entity_type);
-CREATE INDEX IF NOT EXISTS idx_google_calendar_sync_logs_integration_id ON google_calendar_sync_logs (integration_id);
 CREATE INDEX IF NOT EXISTS idx_collection_merges_target ON collection_merges (target_collection_id);
 CREATE INDEX IF NOT EXISTS idx_collection_merges_source ON collection_merges (source_collection_id);
 CREATE INDEX IF NOT EXISTS idx_collection_merges_user ON collection_merges (merged_by_user_id);

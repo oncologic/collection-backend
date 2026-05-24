@@ -1,8 +1,3 @@
-// Mock Stripe so controllers/services that import it do not require live keys.
-jest.mock('../../services/stripe.js', () => ({
-  stripe: {},
-}));
-
 // Mock the middleware used by the collection router.
 jest.mock('../../middleware/authMiddleware.js', () => ({
   requireAdmin: () => (req, res, next) => next(),

@@ -100,6 +100,61 @@ export const getResourcesWithRelations = (
     );
 };
 
+const normalizeIntegerId = (value) => {
+  const rawValue = typeof value === 'object' ? value?.id : value;
+  if (rawValue === undefined || rawValue === null || rawValue === '') {
+    return null;
+  }
+
+  const normalizedValue = Number(rawValue);
+  return Number.isFinite(normalizedValue) ? normalizedValue : null;
+};
+
+const resolveTargetAudienceId = async ({ targetAudienceId, tenantId }) => {
+  const normalizedTargetAudienceId = normalizeIntegerId(targetAudienceId);
+
+  if (normalizedTargetAudienceId) {
+    const [matchedTargetAudience] = await db
+      .select({ id: targetAudiences.id })
+      .from(targetAudiences)
+      .where(
+        and(
+          eq(targetAudiences.id, normalizedTargetAudienceId),
+          or(
+            sql`${targetAudiences.tenantId} IS NULL`,
+            tenantId ? eq(targetAudiences.tenantId, tenantId) : sql`FALSE`
+          )
+        )
+      )
+      .limit(1);
+
+    if (matchedTargetAudience) {
+      return matchedTargetAudience.id;
+    }
+  }
+
+  const [defaultTargetAudience] = await db
+    .select({ id: targetAudiences.id })
+    .from(targetAudiences)
+    .where(
+      or(
+        sql`${targetAudiences.tenantId} IS NULL`,
+        tenantId ? eq(targetAudiences.tenantId, tenantId) : sql`FALSE`
+      )
+    )
+    .orderBy(
+      sql`CASE WHEN LOWER(${targetAudiences.name}) = 'patients' THEN 0 ELSE 1 END`,
+      targetAudiences.id
+    )
+    .limit(1);
+
+  if (!defaultTargetAudience) {
+    throw new Error('No target audiences are available for resource creation');
+  }
+
+  return defaultTargetAudience.id;
+};
+
 export async function createResourceService(data) {
   try {
     const normalizedTagIds = Array.isArray(data.tags)
@@ -115,6 +170,11 @@ export async function createResourceService(data) {
       userId: data.addedByUserId,
     });
 
+    const targetAudienceId = await resolveTargetAudienceId({
+      targetAudienceId: data.targetAudienceId,
+      tenantId: data.tenantId,
+    });
+
     // Only include fields that match your database schema
     const cleanedData = {
       url: data.url,
@@ -122,7 +182,7 @@ export async function createResourceService(data) {
       resourceDate: data.resourceDate,
       resourceUpdatedDate: data.resourceUpdatedDate,
       buttonName: data.buttonName,
-      targetAudienceId: data.targetAudienceId,
+      targetAudienceId,
       requiresRegistration: data.requiresRegistration,
       videoUrl: data.videoUrl,
       videoKey: data.videoKey,
@@ -1246,11 +1306,10 @@ export async function createPendingResourceSuggestionService(data) {
       .orderBy(expertiseLevels.id)
       .limit(1);
 
-    // Get default target audience
-    const [defaultTargetAudience] = await db
-      .select()
-      .from(targetAudiences)
-      .limit(1);
+    const targetAudienceId = await resolveTargetAudienceId({
+      targetAudienceId: data.targetAudienceId,
+      tenantId: data.tenantId,
+    });
 
     // Get or create system user if no user provided
     let addedByUserId = data.addedByUserId;
@@ -1269,7 +1328,7 @@ export async function createPendingResourceSuggestionService(data) {
       typeId: data.typeId || defaultResourceType.id,
       sensitivityLevelId: data.sensitivityLevelId || defaultSensitivity.id,
       expertiseLevelId: data.expertiseLevelId || defaultExpertise.id,
-      targetAudienceId: data.targetAudienceId || defaultTargetAudience.id,
+      targetAudienceId,
       addedByUserId: addedByUserId,
       tenantId: data.tenantId, // Use provided tenantId (validated in controller)
       status: 'pending', // Set status to pending

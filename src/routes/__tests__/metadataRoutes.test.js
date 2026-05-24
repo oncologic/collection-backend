@@ -18,6 +18,9 @@ jest.mock('../../middleware/rateLimitMiddleware.js', () => ({
 jest.mock('../../controllers/metadataController.js', () => ({
   metadataController: {
     getAllResourceTypes: jest.fn(),
+    createResourceType: jest.fn(),
+    updateResourceType: jest.fn(),
+    deleteResourceType: jest.fn(),
     getAllEventTypes: jest.fn(),
     createEventType: jest.fn(),
     updateEventType: jest.fn(),

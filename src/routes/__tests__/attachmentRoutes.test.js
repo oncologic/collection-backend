@@ -17,6 +17,8 @@ jest.mock('../../middleware/upload.js', () => ({
 jest.mock('../../controllers/attachmentController.js', () => ({
   attachmentController: {
     createAttachment: jest.fn(),
+    createUploadIntent: jest.fn(),
+    completeUpload: jest.fn(),
     searchAttachments: jest.fn(),
     updateAttachment: jest.fn(),
     deleteAttachment: jest.fn(),
@@ -37,9 +39,8 @@ const getRoute = (path, method) =>
 describe('attachmentRoutes', () => {
   beforeAll(async () => {
     ({ default: attachmentRoutes } = await import('../attachmentRoutes.js'));
-    ({ attachmentController } = await import(
-      '../../controllers/attachmentController.js'
-    ));
+    ({ attachmentController } =
+      await import('../../controllers/attachmentController.js'));
   });
 
   beforeEach(() => {
@@ -63,5 +64,28 @@ describe('attachmentRoutes', () => {
     expect(route.stack).toHaveLength(2);
     expect(route.stack[0].handle).toBe(mockRequireUserAndTenantsMiddleware);
     expect(route.stack[1].handle).toBe(attachmentController.searchAttachments);
+  });
+
+  it('registers direct upload intent and complete routes before id routes', () => {
+    const intentRoute = getRoute('/upload-intent', 'post');
+    const completeRoute = getRoute('/upload-complete', 'post');
+
+    expect(intentRoute).toBeDefined();
+    expect(intentRoute.stack).toHaveLength(2);
+    expect(intentRoute.stack[0].handle).toBe(
+      mockRequireUserAndTenantsMiddleware
+    );
+    expect(intentRoute.stack[1].handle).toBe(
+      attachmentController.createUploadIntent
+    );
+
+    expect(completeRoute).toBeDefined();
+    expect(completeRoute.stack).toHaveLength(2);
+    expect(completeRoute.stack[0].handle).toBe(
+      mockRequireUserAndTenantsMiddleware
+    );
+    expect(completeRoute.stack[1].handle).toBe(
+      attachmentController.completeUpload
+    );
   });
 });

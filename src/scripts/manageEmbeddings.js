@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { Command } from 'commander';
-import { db } from '../db/index.js';
+import { db, pool } from '../db/index.js';
 import {
   updateResourceEmbeddings,
   updateCollectionEmbeddings,
@@ -9,10 +9,14 @@ import {
   updateNotationEmbeddings,
   updateLinkGroupEmbeddings,
   updateAttachmentEmbeddings,
+  updateOrganizationEmbeddings,
+  updateEventEmbeddings,
   updateAllCollectionEmbeddings,
   generateChunkedEmbedding,
   semanticSearchResources,
   semanticSearchAllCollectionContentExtended,
+  getEmbeddingConfiguration,
+  stopMemoryMonitoring,
 } from '../services/vectorService.js';
 import { sql } from 'drizzle-orm';
 
@@ -23,6 +27,11 @@ program
   .description('CLI tool for managing vector embeddings')
   .version('1.0.0');
 
+program.hook('postAction', async () => {
+  stopMemoryMonitoring();
+  await pool.end();
+});
+
 /**
  * Initialize embeddings for all existing data
  */
@@ -31,7 +40,7 @@ program
   .description('Initialize embeddings for all existing data')
   .option(
     '-t, --type <type>',
-    'Type to initialize (resources|collections|link-groups|all)',
+    'Type to initialize (resources|collections|link-groups|organizations|events|all)',
     'all'
   )
   .option('-b, --batch-size <number>', 'Batch size for processing', '10')
@@ -76,6 +85,14 @@ program
           await db.execute(
             sql`UPDATE link_groups SET vector_updated_at = NULL`
           );
+        }
+        if (options.type === 'all' || options.type === 'organizations') {
+          await db.execute(
+            sql`UPDATE organizations SET vector_updated_at = NULL`
+          );
+        }
+        if (options.type === 'all' || options.type === 'events') {
+          await db.execute(sql`UPDATE events SET vector_updated_at = NULL`);
         }
 
         console.log(
@@ -132,6 +149,22 @@ program
           );
         }
 
+        if (options.type === 'all' || options.type === 'organizations') {
+          const organizationCount = await db.execute(
+            sql`SELECT COUNT(*) as count FROM organizations WHERE combined_embedding IS NULL OR vector_updated_at IS NULL`
+          );
+          console.log(
+            `Organizations needing embeddings: ${organizationCount.rows[0].count}`
+          );
+        }
+
+        if (options.type === 'all' || options.type === 'events') {
+          const eventCount = await db.execute(
+            sql`SELECT COUNT(*) as count FROM events WHERE combined_embedding IS NULL OR vector_updated_at IS NULL`
+          );
+          console.log(`Events needing embeddings: ${eventCount.rows[0].count}`);
+        }
+
         return;
       }
 
@@ -146,11 +179,19 @@ program
         case 'link-groups':
           await updateLinkGroupEmbeddings();
           break;
+        case 'organizations':
+          await updateOrganizationEmbeddings();
+          break;
+        case 'events':
+          await updateEventEmbeddings();
+          break;
         case 'all':
         default:
           console.log('🔄 Initializing all embeddings...');
           await updateResourceEmbeddings();
           await updateAllCollectionEmbeddings();
+          await updateOrganizationEmbeddings();
+          await updateEventEmbeddings();
           break;
       }
 
@@ -169,7 +210,7 @@ program
   .description('Update embeddings for modified data')
   .option(
     '-t, --type <type>',
-    'Type to update (resources|collections|link-groups|all)',
+    'Type to update (resources|collections|link-groups|organizations|events|all)',
     'all'
   )
   .action(async (options) => {
@@ -189,10 +230,18 @@ program
         case 'link-groups':
           await updateLinkGroupEmbeddings();
           break;
+        case 'organizations':
+          await updateOrganizationEmbeddings();
+          break;
+        case 'events':
+          await updateEventEmbeddings();
+          break;
         case 'all':
         default:
           await updateResourceEmbeddings();
           await updateAllCollectionEmbeddings();
+          await updateOrganizationEmbeddings();
+          await updateEventEmbeddings();
           break;
       }
 
@@ -262,6 +311,16 @@ program
     console.log('🔍 Running vector database health check...');
 
     try {
+      const embeddingConfig = getEmbeddingConfiguration();
+      console.log('\n🧠 Embedding Provider:');
+      console.log(`   Provider: ${embeddingConfig.provider}`);
+      console.log(`   Model: ${embeddingConfig.model}`);
+      console.log(`   Model dimensions: ${embeddingConfig.modelDimensions}`);
+      console.log(
+        `   Storage dimensions: ${embeddingConfig.storageDimensions}`
+      );
+      console.log(`   Base URL: ${embeddingConfig.baseUrl}`);
+
       // Check database connection
       await db.execute(sql`SELECT 1`);
       console.log('✅ Database connection: OK');
@@ -282,7 +341,7 @@ program
 
       // Check resources
       const resourceStats = await db.execute(sql`
-        SELECT 
+        SELECT
           COUNT(*) as total_rows,
           COUNT(combined_embedding) as embedded_rows,
           COUNT(*) - COUNT(combined_embedding) as missing_embeddings
@@ -297,7 +356,7 @@ program
 
       // Check collections
       const collectionStats = await db.execute(sql`
-        SELECT 
+        SELECT
           COUNT(*) as total_rows,
           COUNT(combined_embedding) as embedded_rows,
           COUNT(*) - COUNT(combined_embedding) as missing_embeddings
@@ -314,7 +373,7 @@ program
 
       // Check external links
       const externalLinkStats = await db.execute(sql`
-        SELECT 
+        SELECT
           COUNT(*) as total_rows,
           COUNT(combined_embedding) as embedded_rows,
           COUNT(*) - COUNT(combined_embedding) as missing_embeddings
@@ -331,7 +390,7 @@ program
 
       // Check link groups
       const linkGroupStats = await db.execute(sql`
-        SELECT 
+        SELECT
           COUNT(*) as total_rows,
           COUNT(combined_embedding) as embedded_rows,
           COUNT(*) - COUNT(combined_embedding) as missing_embeddings
@@ -348,7 +407,7 @@ program
 
       // Check notations
       const notationStats = await db.execute(sql`
-        SELECT 
+        SELECT
           COUNT(*) as total_rows,
           COUNT(combined_embedding) as embedded_rows,
           COUNT(*) - COUNT(combined_embedding) as missing_embeddings
@@ -363,7 +422,7 @@ program
 
       // Check attachments
       const attachmentStats = await db.execute(sql`
-        SELECT 
+        SELECT
           COUNT(*) as total_rows,
           COUNT(combined_embedding) as embedded_rows,
           COUNT(*) - COUNT(combined_embedding) as missing_embeddings
@@ -378,6 +437,36 @@ program
         `   Missing embeddings: ${attachmentStats.rows[0].missing_embeddings}`
       );
 
+      const organizationStats = await db.execute(sql`
+        SELECT
+          COUNT(*) as total_rows,
+          COUNT(combined_embedding) as embedded_rows,
+          COUNT(*) - COUNT(combined_embedding) as missing_embeddings
+        FROM organizations
+      `);
+      console.log(`\n🏢 Organizations:`);
+      console.log(`   Total: ${organizationStats.rows[0].total_rows}`);
+      console.log(
+        `   With embeddings: ${organizationStats.rows[0].embedded_rows}`
+      );
+      console.log(
+        `   Missing embeddings: ${organizationStats.rows[0].missing_embeddings}`
+      );
+
+      const eventStats = await db.execute(sql`
+        SELECT
+          COUNT(*) as total_rows,
+          COUNT(combined_embedding) as embedded_rows,
+          COUNT(*) - COUNT(combined_embedding) as missing_embeddings
+        FROM events
+      `);
+      console.log(`\n📅 Events:`);
+      console.log(`   Total: ${eventStats.rows[0].total_rows}`);
+      console.log(`   With embeddings: ${eventStats.rows[0].embedded_rows}`);
+      console.log(
+        `   Missing embeddings: ${eventStats.rows[0].missing_embeddings}`
+      );
+
       // Calculate totals
       const totalMissing =
         parseInt(resourceStats.rows[0].missing_embeddings) +
@@ -385,7 +474,9 @@ program
         parseInt(externalLinkStats.rows[0].missing_embeddings) +
         parseInt(linkGroupStats.rows[0].missing_embeddings) +
         parseInt(notationStats.rows[0].missing_embeddings) +
-        parseInt(attachmentStats.rows[0].missing_embeddings);
+        parseInt(attachmentStats.rows[0].missing_embeddings) +
+        parseInt(organizationStats.rows[0].missing_embeddings) +
+        parseInt(eventStats.rows[0].missing_embeddings);
 
       if (totalMissing > 0) {
         console.log(`\n⚠️  Total missing embeddings: ${totalMissing}`);
@@ -446,4 +537,4 @@ program
     }
   });
 
-program.parse();
+await program.parseAsync();

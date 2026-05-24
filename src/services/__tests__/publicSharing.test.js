@@ -63,7 +63,6 @@ const mockUpdateQuery = (rows) => {
 
 describe('Public sharing guards', () => {
   beforeAll(async () => {
-    process.env.STRIPE_SECRET_KEY = 'sk_test_dummy';
     ({
       toggleCollectionPublicJsonSharingService,
       toggleExternalLinkPublicJsonSharingService,

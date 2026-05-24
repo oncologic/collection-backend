@@ -61,7 +61,7 @@ export const transformTSVData = async (parsedData, tenantId) => {
   const defaultTargetAudienceId = targetAudiencesData.find(ta => ta.name === 'Patients')?.id || targetAudiencesData[0]?.id;
 
   for (const row of parsedData) {
-    const organizationName = row['Organization']?.trim() || '';
+    const organizationName = getBusinessUnitNameFromRow(row);
     const resourceName =
       row['Resource Name']?.trim() || row['Name']?.trim() || organizationName;
 
@@ -194,6 +194,10 @@ const generateTagColor = (name) => {
   const index = name.length % colors.length;
   return colors[index];
 };
+
+function getBusinessUnitNameFromRow(row) {
+  return row['Business Unit']?.trim() || row['Organization']?.trim() || '';
+}
 
 const normalizeImportOrganizationName = (name) =>
   name?.trim().toLowerCase() || '';
