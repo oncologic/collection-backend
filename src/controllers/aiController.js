@@ -61,12 +61,287 @@ import { db } from '../db/index.js';
 import { eq, and } from 'drizzle-orm';
 import { collectionExternalLinks } from '../models/external_links.js';
 import { collectionExternalLinkCollaborators } from '../models/collectionExternalLinkCollaborators.js';
+import { linkGroups } from '../models/linkGroup.js';
 
 const UUID_REGEX =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const isUuid = (value) =>
   typeof value === 'string' && UUID_REGEX.test(value.trim());
+
+const ALLOWED_RESOURCE_DURATION_UNITS = new Set([
+  'minutes',
+  'hours',
+  'days',
+  'weeks',
+  'months',
+  'years',
+]);
+
+const normalizeStructuredResourceDuration = (resource) => {
+  const hasValue =
+    resource.durationValue !== undefined &&
+    resource.durationValue !== null &&
+    resource.durationValue !== '';
+  const hasUnit =
+    resource.durationUnit !== undefined &&
+    resource.durationUnit !== null &&
+    resource.durationUnit !== '';
+
+  if (!hasValue && !hasUnit) {
+    resource.durationValue = null;
+    resource.durationUnit = null;
+    return;
+  }
+
+  const durationValue = Number(resource.durationValue);
+  const durationUnit = String(resource.durationUnit || '').trim().toLowerCase();
+
+  if (
+    !Number.isFinite(durationValue) ||
+    durationValue <= 0 ||
+    !ALLOWED_RESOURCE_DURATION_UNITS.has(durationUnit)
+  ) {
+    resource.durationValue = null;
+    resource.durationUnit = null;
+    return;
+  }
+
+  resource.durationValue = durationValue;
+  resource.durationUnit = durationUnit;
+};
+
+const normalizeStructuredResourceLinks = (resource) => {
+  ['relatedResourceKeys', 'relatedResourceNames', 'relatedResourceUrls'].forEach(
+    (field) => {
+      const rawValue = resource[field];
+      const values = Array.isArray(rawValue)
+        ? rawValue
+        : String(rawValue || '')
+            .split(/[;,]/)
+            .map((item) => item.trim());
+
+      resource[field] = values
+        .map((item) => String(item || '').trim())
+        .filter(Boolean);
+    }
+  );
+
+  resource.resourceKey = resource.resourceKey
+    ? String(resource.resourceKey).trim()
+    : null;
+  resource.relatedLinkCategory = resource.relatedLinkCategory
+    ? String(resource.relatedLinkCategory).trim().toLowerCase()
+    : 'resource';
+  resource.relatedLinkDescription = resource.relatedLinkDescription
+    ? String(resource.relatedLinkDescription).trim()
+    : null;
+  const relatedLinkVisibility = String(
+    resource.relatedLinkVisibility || ''
+  ).toLowerCase();
+  resource.relatedLinkVisibility = ['private', 'unlisted', 'public'].includes(
+    relatedLinkVisibility
+  )
+    ? relatedLinkVisibility
+    : 'private';
+};
+
+const normalizeRelatedResourceLookup = (value) =>
+  String(value || '').trim().toLowerCase();
+
+const normalizeRelatedResourceUrlLookup = (value) =>
+  normalizeRelatedResourceLookup(value).replace(/\/+$/, '');
+
+const buildStructuredResourceUrl = (resourceId) => {
+  const appUrl = (
+    process.env.FRONTEND_APP_URL ||
+    process.env.FRONTEND_URL ||
+    process.env.NEXT_PUBLIC_APP_URL ||
+    process.env.CLIENT_URL ||
+    ''
+  ).replace(/\/+$/, '');
+  const path = `/resources/${resourceId}`;
+
+  return appUrl ? `${appUrl}${path}` : path;
+};
+
+const getStructuredResourceReferences = (resourceData = {}) => [
+  ...(resourceData.relatedResourceKeys || []).map((value) => ({
+    type: 'key',
+    value,
+  })),
+  ...(resourceData.relatedResourceNames || []).map((value) => ({
+    type: 'name',
+    value,
+  })),
+  ...(resourceData.relatedResourceUrls || []).map((value) => ({
+    type: 'url',
+    value,
+  })),
+];
+
+const createStructuredResourceLookup = (records = []) => {
+  const lookup = {
+    byKey: new Map(),
+    byName: new Map(),
+    byUrl: new Map(),
+  };
+
+  records.forEach((record) => {
+    const { resource, resourceData } = record;
+    const key = normalizeRelatedResourceLookup(resourceData.resourceKey);
+    const name = normalizeRelatedResourceLookup(resourceData.name || resource.name);
+    const url = normalizeRelatedResourceUrlLookup(resourceData.url || resource.url);
+
+    if (key && !lookup.byKey.has(key)) lookup.byKey.set(key, record);
+    if (name && !lookup.byName.has(name)) lookup.byName.set(name, record);
+    if (url && !lookup.byUrl.has(url)) lookup.byUrl.set(url, record);
+  });
+
+  return lookup;
+};
+
+const resolveStructuredResourceReference = (lookup, reference) => {
+  if (!reference?.value) return null;
+
+  if (reference.type === 'key') {
+    return lookup.byKey.get(normalizeRelatedResourceLookup(reference.value)) || null;
+  }
+
+  if (reference.type === 'name') {
+    return lookup.byName.get(normalizeRelatedResourceLookup(reference.value)) || null;
+  }
+
+  if (reference.type === 'url') {
+    const matchedResource = lookup.byUrl.get(
+      normalizeRelatedResourceUrlLookup(reference.value)
+    );
+
+    if (matchedResource) {
+      return matchedResource;
+    }
+
+    return {
+      externalUrl: reference.value,
+      externalName: reference.value,
+    };
+  }
+
+  return null;
+};
+
+const createStructuredResourceRelatedLinks = async ({
+  records,
+  userId,
+  results,
+}) => {
+  const lookup = createStructuredResourceLookup(records);
+
+  for (const sourceRecord of records) {
+    const sourceResource = sourceRecord.resource;
+    const sourceData = sourceRecord.resourceData;
+    const references = getStructuredResourceReferences(sourceData);
+
+    if (references.length === 0) {
+      continue;
+    }
+
+    const createdTargets = new Set();
+
+    for (const reference of references) {
+      const targetRecord = resolveStructuredResourceReference(lookup, reference);
+
+      if (!targetRecord) {
+        results.relatedLinksSkipped.push({
+          source: sourceData.name,
+          reference: reference.value,
+          reason: `No generated resource matched related resource ${reference.type}`,
+        });
+        continue;
+      }
+
+      const targetResource = targetRecord.resource;
+      const targetUrl = targetResource
+        ? buildStructuredResourceUrl(targetResource.id)
+        : targetRecord.externalUrl;
+      const dedupeKey = targetResource
+        ? `resource:${targetResource.id}`
+        : `url:${normalizeRelatedResourceUrlLookup(targetUrl)}`;
+
+      if (!targetUrl || createdTargets.has(dedupeKey)) {
+        continue;
+      }
+
+      if (targetResource?.id === sourceResource.id) {
+        results.relatedLinksSkipped.push({
+          source: sourceData.name,
+          reference: reference.value,
+          reason: 'Related resource matched the source resource',
+        });
+        continue;
+      }
+
+      createdTargets.add(dedupeKey);
+
+      const sourceTenantId =
+        sourceResource.tenantId ||
+        sourceData.tenantId ||
+        process.env.COMMUNITY_TENANT ||
+        null;
+
+      try {
+        const [existingLink] = await db
+          .select({ id: linkGroups.id })
+          .from(linkGroups)
+          .where(
+            and(
+              eq(linkGroups.linkingId, sourceResource.id),
+              eq(linkGroups.linkingType, 'resource'),
+              eq(linkGroups.url, targetUrl),
+              sourceTenantId
+                ? eq(linkGroups.tenantId, sourceTenantId)
+                : eq(linkGroups.linkingId, sourceResource.id)
+            )
+          )
+          .limit(1);
+
+        if (existingLink) {
+          results.relatedLinksSkipped.push({
+            source: sourceData.name,
+            reference: reference.value,
+            reason: 'Related link already exists',
+          });
+          continue;
+        }
+
+        await db.insert(linkGroups).values({
+          name:
+            targetRecord.resourceData?.name ||
+            targetResource?.name ||
+            targetRecord.externalName ||
+            targetUrl,
+          description: sourceData.relatedLinkDescription || null,
+          url: targetUrl,
+          category: sourceData.relatedLinkCategory || 'resource',
+          linkingId: sourceResource.id,
+          linkingType: 'resource',
+          visibility: sourceData.relatedLinkVisibility || 'private',
+          userId,
+          tenantId: sourceTenantId,
+        });
+
+        results.relatedLinksCreated++;
+      } catch (error) {
+        console.error('Error creating AI resource related link:', error);
+        results.relatedLinksSkipped.push({
+          source: sourceData.name,
+          reference: reference.value,
+          reason: error.message,
+        });
+      }
+    }
+  }
+};
 
 const collectReferenceIds = (value, ids = new Set()) => {
   if (!value) return ids;
@@ -1862,6 +2137,9 @@ export const aiController = {
 
       // Process and validate resources
       structuredResult.data.forEach((resource) => {
+        normalizeStructuredResourceDuration(resource);
+        normalizeStructuredResourceLinks(resource);
+
         // Ensure tenant ID
         if (!resource.tenantId) {
           resource.tenantId = tenantIds[0] || process.env.COMMUNITY_TENANT;
@@ -2008,7 +2286,10 @@ export const aiController = {
         errors: [],
         createdResources: [],
         createdOrganizations: Array.from(organizationMapping.values()),
+        relatedLinksCreated: 0,
+        relatedLinksSkipped: [],
       };
+      const createdResourceRecords = [];
 
       // If no resources to create, return early with just organization results
       if (!resources || resources.length === 0) {
@@ -2022,6 +2303,9 @@ export const aiController = {
         const resource = resources[i];
 
         try {
+          normalizeStructuredResourceDuration(resource);
+          normalizeStructuredResourceLinks(resource);
+
           // Ensure required fields
           if (!resource.name || !resource.url) {
             throw new Error('Resource name and URL are required');
@@ -2060,6 +2344,10 @@ export const aiController = {
             id: createdResource.id,
             name: createdResource.name,
           });
+          createdResourceRecords.push({
+            resource: createdResource,
+            resourceData: { ...resource },
+          });
         } catch (error) {
           console.error(`Error creating resource ${i + 1}:`, error);
           results.failed++;
@@ -2071,8 +2359,14 @@ export const aiController = {
         }
       }
 
+      await createStructuredResourceRelatedLinks({
+        records: createdResourceRecords,
+        userId,
+        results,
+      });
+
       return res.json({
-        message: `Created ${results.successful} resources successfully${results.createdOrganizations.length > 0 ? ` and ${results.createdOrganizations.length} organizations` : ''}`,
+        message: `Created ${results.successful} resources successfully${results.createdOrganizations.length > 0 ? ` and ${results.createdOrganizations.length} organizations` : ''}${results.relatedLinksCreated > 0 ? ` with ${results.relatedLinksCreated} related links` : ''}`,
         results,
       });
     } catch (error) {

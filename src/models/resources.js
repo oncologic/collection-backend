@@ -30,6 +30,12 @@ const vector = customType({
   },
 });
 
+const numeric = customType({
+  dataType() {
+    return 'numeric(10,2)';
+  },
+});
+
 // Resources table
 export const resources = pgTable('resources', {
   id: uuid('id').defaultRandom().primaryKey(),
@@ -66,6 +72,8 @@ export const resources = pgTable('resources', {
   updatedAt: timestamp('updated_at').defaultNow(),
   timestamps: text('timestamps'),
   fullText: text('full_text'),
+  durationValue: numeric('duration_value'),
+  durationUnit: varchar('duration_unit', { length: 30 }),
   tenantId: uuid('tenant_id').references(() => tenants.id),
   status: varchar('status', { length: 50 }).default('approved').notNull(), // pending, approved, rejected
   suggestedByEmail: varchar('suggested_by_email', { length: 255 }), // Email of person who suggested (for pending resources)

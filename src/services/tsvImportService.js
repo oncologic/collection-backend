@@ -2,6 +2,7 @@ import { db } from '../db/index.js';
 import { organizations, organizationTags, organizationResources } from '../models/organizations.js';
 import { resources, resourceTags } from '../models/resources.js';
 import { tags } from '../models/tags.js';
+import { linkGroups } from '../models/linkGroup.js';
 import { eq, and, inArray, sql } from 'drizzle-orm';
 import {
   createResourceService,
@@ -36,6 +37,156 @@ export const parseTSVContent = (tsvContent) => {
   return data;
 };
 
+const getRowValue = (row, aliases = []) => {
+  for (const alias of aliases) {
+    const value = row?.[alias];
+    if (value !== undefined && value !== null && String(value).trim() !== '') {
+      return String(value).trim();
+    }
+  }
+
+  return '';
+};
+
+const splitImportList = (value) =>
+  String(value || '')
+    .split(/[;,]/)
+    .map((item) => item.trim())
+    .filter((item) => item && item.toLowerCase() !== 'n/a');
+
+const normalizeLookup = (value) => String(value || '').trim().toLowerCase();
+
+const findMetadataByName = (items, name) => {
+  const normalizedName = normalizeLookup(name);
+  if (!normalizedName) return null;
+
+  return items.find((item) => normalizeLookup(item.name) === normalizedName) || null;
+};
+
+const normalizeBoolean = (value) => {
+  const normalized = normalizeLookup(value);
+  if (!normalized) return undefined;
+  return ['true', 'yes', '1', 'y'].includes(normalized);
+};
+
+const normalizeImportVisibility = (value) => {
+  const normalized = normalizeLookup(value);
+  return ['private', 'unlisted', 'public'].includes(normalized)
+    ? normalized
+    : 'private';
+};
+
+const normalizeImportCategory = (value) => normalizeLookup(value) || 'resource';
+
+const DURATION_UNIT_ALIASES = {
+  minute: 'minutes',
+  minutes: 'minutes',
+  min: 'minutes',
+  mins: 'minutes',
+  hour: 'hours',
+  hours: 'hours',
+  hr: 'hours',
+  hrs: 'hours',
+  day: 'days',
+  days: 'days',
+  week: 'weeks',
+  weeks: 'weeks',
+  month: 'months',
+  months: 'months',
+  year: 'years',
+  years: 'years',
+  yr: 'years',
+  yrs: 'years',
+};
+
+export const normalizeImportDurationFields = (row = {}) => {
+  const rawValue = getRowValue(row, [
+    'durationValue',
+    'Duration Value',
+    'Estimated Duration Value',
+    'estimatedDurationValue',
+  ]);
+  const rawUnit = getRowValue(row, [
+    'durationUnit',
+    'Duration Unit',
+    'Estimated Duration Unit',
+    'estimatedDurationUnit',
+  ]);
+
+  if (!rawValue && !rawUnit) {
+    return {
+      durationValue: null,
+      durationUnit: null,
+    };
+  }
+
+  const durationValue = Number(rawValue);
+  const durationUnit = DURATION_UNIT_ALIASES[normalizeLookup(rawUnit)];
+
+  if (!Number.isFinite(durationValue) || durationValue <= 0) {
+    throw new Error(`Invalid duration value: ${rawValue || '(blank)'}`);
+  }
+
+  if (!durationUnit) {
+    throw new Error(`Invalid duration unit: ${rawUnit || '(blank)'}`);
+  }
+
+  return {
+    durationValue,
+    durationUnit,
+  };
+};
+
+export const normalizeImportRelatedResourceFields = (row = {}) => ({
+  resourceKey: getRowValue(row, [
+    'resourceKey',
+    'Resource Key',
+    'resource_key',
+  ]) || null,
+  relatedResourceKeys: splitImportList(
+    getRowValue(row, [
+      'relatedResourceKeys',
+      'Related Resource Keys',
+      'Related Resources',
+      'related_resource_keys',
+    ])
+  ),
+  relatedResourceNames: splitImportList(
+    getRowValue(row, [
+      'relatedResourceNames',
+      'Related Resource Names',
+      'related_resource_names',
+    ])
+  ),
+  relatedResourceUrls: splitImportList(
+    getRowValue(row, [
+      'relatedResourceUrls',
+      'Related Resource URLs',
+      'related_resource_urls',
+    ])
+  ),
+  relatedLinkCategory: normalizeImportCategory(
+    getRowValue(row, [
+      'relatedLinkCategory',
+      'Related Link Category',
+      'related_link_category',
+    ])
+  ),
+  relatedLinkDescription:
+    getRowValue(row, [
+      'relatedLinkDescription',
+      'Related Link Description',
+      'related_link_description',
+    ]) || null,
+  relatedLinkVisibility: normalizeImportVisibility(
+    getRowValue(row, [
+      'relatedLinkVisibility',
+      'Related Link Visibility',
+      'related_link_visibility',
+    ])
+  ),
+});
+
 /**
  * Transform parsed TSV data into organizations and resources
  */
@@ -63,28 +214,71 @@ export const transformTSVData = async (parsedData, tenantId) => {
   for (const row of parsedData) {
     const organizationName = getBusinessUnitNameFromRow(row);
     const resourceName =
-      row['Resource Name']?.trim() || row['Name']?.trim() || organizationName;
+      getRowValue(row, ['Resource Name', 'name', 'Name']) || organizationName;
+    const resourceUrl = getRowValue(row, ['url', 'URL', 'Resource URL', 'Link']);
+    const description = getRowValue(row, ['description', 'Description']);
+    const resourceDate =
+      getRowValue(row, ['resourceDate', 'Resource Date']) ||
+      new Date().toISOString().slice(0, 10);
+    const resourceUpdatedDate = getRowValue(row, [
+      'resourceUpdatedDate',
+      'Resource Updated Date',
+      'updatedDate',
+    ]);
+    const resourceTypeName = getRowValue(row, [
+      'resourceType',
+      'Resource Type',
+      'Type',
+    ]);
+    const sensitivityLevelName = getRowValue(row, [
+      'sensitivityLevel',
+      'Sensitivity',
+      'Sensitivity Level',
+    ]);
+    const expertiseLevelName = getRowValue(row, [
+      'expertiseLevel',
+      'Expertise',
+      'Expertise Level',
+    ]);
+    const targetAudienceName = getRowValue(row, [
+      'targetAudience',
+      'Target Audience',
+    ]);
+    const durationFields = normalizeImportDurationFields(row);
+    const relatedResourceFields = normalizeImportRelatedResourceFields(row);
 
     // Extract service tags (filter out N/A)
-    const services = row['Service']?.split(',')
-      .map(s => s.trim())
-      .filter(s => s && s !== 'N/A' && s.toLowerCase() !== 'n/a') || [];
+    const services = splitImportList(getRowValue(row, ['Service', 'service', 'Services']));
     services.forEach(service => transformedData.tags.add(service));
 
     // Extract accessibility tags (filter out N/A)
-    const accessibilityTags = row['Accessibility']?.split(',')
-      .map(a => a.trim())
-      .filter(a => a && a !== 'N/A' && a.toLowerCase() !== 'n/a') || [];
+    const accessibilityTags = splitImportList(getRowValue(row, ['Accessibility', 'accessibility']));
     accessibilityTags.forEach(tag => transformedData.tags.add(tag));
+
+    const explicitTags = splitImportList(getRowValue(row, ['tags', 'Tags']));
+    explicitTags.forEach(tag => transformedData.tags.add(tag));
+
+    const resourceType =
+      findMetadataByName(resourceTypesData, resourceTypeName) ||
+      (resourceTypeName ? null : null);
+    const sensitivityLevel =
+      findMetadataByName(sensitivityLevelsData, sensitivityLevelName) ||
+      (sensitivityLevelName ? null : null);
+    const expertiseLevel =
+      findMetadataByName(expertiseLevelsData, expertiseLevelName) ||
+      (expertiseLevelName ? null : null);
+    const targetAudience =
+      findMetadataByName(targetAudiencesData, targetAudienceName) ||
+      (targetAudienceName ? null : null);
 
     // Create organization object only when a resource is explicitly assigned
     if (organizationName) {
       const org = {
         name: organizationName,
-        email: row['Email'] !== 'N/A' ? row['Email'] : null,
-        phone: row['Phone number'] !== 'N/A' ? row['Phone number'] : null,
-        website: row['Link'] !== 'N/A' ? row['Link'] : null,
-        description: row['Description'] || '',
+        email: getRowValue(row, ['Email', 'email']) || null,
+        phone: getRowValue(row, ['Phone number', 'phone']) || null,
+        website: resourceUrl || null,
+        description,
         tenantId: tenantId,
         professional: true,
         tags: [...services], // Services will be tags for the organization
@@ -96,18 +290,29 @@ export const transformTSVData = async (parsedData, tenantId) => {
     // Create resource object
     const resource = {
       name: resourceName,
-      url: row['Link'] !== 'N/A' ? row['Link'] : null,
-      description: row['Description'] || '',
-      typeId: defaultResourceTypeId,
-      sensitivityLevelId: defaultSensitivityLevelId,
-      expertiseLevelId: defaultExpertiseLevelId,
-      targetAudienceId: defaultTargetAudienceId,
+      url: resourceUrl || null,
+      description,
+      typeId: resourceType?.id || defaultResourceTypeId,
+      sensitivityLevelId: sensitivityLevel?.id || defaultSensitivityLevelId,
+      expertiseLevelId: expertiseLevel?.id || defaultExpertiseLevelId,
+      targetAudienceId: targetAudience?.id || defaultTargetAudienceId,
       tenantId: tenantId,
-      resourceDate: new Date(), // Set to today's date (import date)
-      demographics: row['Demographics'] !== 'N/A' ? `Demographics: ${row['Demographics']}` : '',
-      accessibility: row['Accessibility'] !== 'N/A' ? `Accessibility: ${row['Accessibility']}` : '',
-      tags: [...services, ...accessibilityTags], // Both services and accessibility as tags
+      resourceDate,
+      resourceUpdatedDate: resourceUpdatedDate || null,
+      demographics: getRowValue(row, ['Demographics', 'demographics'])
+        ? `Demographics: ${getRowValue(row, ['Demographics', 'demographics'])}`
+        : '',
+      accessibility: getRowValue(row, ['Accessibility', 'accessibility'])
+        ? `Accessibility: ${getRowValue(row, ['Accessibility', 'accessibility'])}`
+        : '',
+      tags: [...services, ...accessibilityTags, ...explicitTags],
       organizationName: organizationName || null, // Link to organization by name when provided
+      videoUrl: getRowValue(row, ['videoUrl', 'Video URL']) || null,
+      timestamps: getRowValue(row, ['timestamps', 'Timestamps']) || null,
+      fullText: getRowValue(row, ['fullText', 'Full Text']) || null,
+      featured: normalizeBoolean(getRowValue(row, ['featured', 'Featured'])),
+      ...durationFields,
+      ...relatedResourceFields,
     };
 
     // Append demographics and accessibility to description if they exist
@@ -128,18 +333,32 @@ export const transformTSVData = async (parsedData, tenantId) => {
 /**
  * Preview import data without saving
  */
-export const previewImportService = async (tsvContent, tenantId) => {
+export const previewImportService = async (importInput, tenantId) => {
   try {
-    const parsedData = parseTSVContent(tsvContent);
+    const parsedData = Array.isArray(importInput)
+      ? importInput
+      : parseTSVContent(importInput);
     const transformedData = await transformTSVData(parsedData, tenantId);
+    const relatedLinkPreview = buildRelatedResourceImportPreview(
+      transformedData.resources
+    );
     
     return {
       success: true,
-      data: transformedData,
+      data: {
+        ...transformedData,
+        relatedLinkPreview,
+      },
       summary: {
         organizationsCount: transformedData.organizations.length,
         resourcesCount: transformedData.resources.length,
         uniqueTagsCount: transformedData.tags.length,
+        relatedLinkReferencesCount:
+          relatedLinkPreview.summary.totalReferences,
+        unresolvedRelatedLinkReferences:
+          relatedLinkPreview.summary.unresolved,
+        selfRelatedLinkReferences:
+          relatedLinkPreview.summary.selfReferences,
       }
     };
   } catch (error) {
@@ -196,7 +415,13 @@ const generateTagColor = (name) => {
 };
 
 function getBusinessUnitNameFromRow(row) {
-  return row['Business Unit']?.trim() || row['Organization']?.trim() || '';
+  return getRowValue(row, [
+    'Business Unit',
+    'businessUnit',
+    'Organization',
+    'organizations',
+    'Organizations',
+  ]);
 }
 
 const normalizeImportOrganizationName = (name) =>
@@ -242,18 +467,366 @@ const findExistingResource = async (name, url, tenantId) => {
   return existing[0] || null;
 };
 
+const getFrontendBaseUrl = () =>
+  (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/+$/, '');
+
+const buildResourceUrl = (resourceId) => `${getFrontendBaseUrl()}/resources/${resourceId}`;
+
+const normalizeResourceUrlLookup = (value) =>
+  String(value || '').trim().replace(/\/+$/, '').toLowerCase();
+
+const createImportedResourceLookup = () => ({
+  byKey: new Map(),
+  byName: new Map(),
+  byUrl: new Map(),
+  records: [],
+});
+
+const setLookupIfPresent = (map, key, entry, normalizer = normalizeLookup) => {
+  const normalizedKey = normalizer(key);
+  if (normalizedKey && !map.has(normalizedKey)) {
+    map.set(normalizedKey, entry);
+  }
+};
+
+const registerImportedResource = (lookup, resourceData, resourceRecord) => {
+  if (!resourceRecord?.id) return;
+
+  const entry = {
+    resourceData,
+    resource: resourceRecord,
+  };
+
+  lookup.records.push(entry);
+  setLookupIfPresent(lookup.byKey, resourceData.resourceKey, entry);
+  setLookupIfPresent(lookup.byName, resourceData.name || resourceRecord.name, entry);
+  setLookupIfPresent(
+    lookup.byUrl,
+    resourceData.url || resourceRecord.url,
+    entry,
+    normalizeResourceUrlLookup
+  );
+  setLookupIfPresent(
+    lookup.byUrl,
+    buildResourceUrl(resourceRecord.id),
+    entry,
+    normalizeResourceUrlLookup
+  );
+};
+
+const getRelatedResourceReferences = (resourceData = {}) => [
+  ...(resourceData.relatedResourceKeys || []).map((value) => ({
+    type: 'key',
+    value,
+  })),
+  ...(resourceData.relatedResourceNames || []).map((value) => ({
+    type: 'name',
+    value,
+  })),
+  ...(resourceData.relatedResourceUrls || []).map((value) => ({
+    type: 'url',
+    value,
+  })),
+];
+
+const resolveRelatedResourceReference = (lookup, reference) => {
+  if (!reference?.value) return null;
+
+  if (reference.type === 'key') {
+    return lookup.byKey.get(normalizeLookup(reference.value)) || null;
+  }
+
+  if (reference.type === 'name') {
+    return lookup.byName.get(normalizeLookup(reference.value)) || null;
+  }
+
+  if (reference.type === 'url') {
+    const matchedResource = lookup.byUrl.get(
+      normalizeResourceUrlLookup(reference.value)
+    );
+
+    if (matchedResource) {
+      return matchedResource;
+    }
+
+    return {
+      externalUrl: reference.value,
+      externalName: reference.value,
+    };
+  }
+
+  return null;
+};
+
+export const buildRelatedResourceImportPreview = (resourcesToPreview = []) => {
+  const lookup = createImportedResourceLookup();
+
+  resourcesToPreview.forEach((resourceData, index) => {
+    registerImportedResource(lookup, resourceData, {
+      id: `preview-${index}`,
+      name: resourceData.name,
+      url: resourceData.url,
+    });
+  });
+
+  const items = [];
+  const summary = {
+    totalReferences: 0,
+    resolvedImported: 0,
+    resolvedExternalUrl: 0,
+    duplicateReferences: 0,
+    selfReferences: 0,
+    unresolved: 0,
+  };
+
+  for (const sourceEntry of lookup.records) {
+    const sourceResource = sourceEntry.resource;
+    const sourceData = sourceEntry.resourceData;
+    const references = getRelatedResourceReferences(sourceData);
+    const seenTargets = new Set();
+
+    for (const reference of references) {
+      summary.totalReferences += 1;
+
+      const targetEntry = resolveRelatedResourceReference(lookup, reference);
+      const diagnostic = {
+        sourceName: sourceData.name,
+        sourceResourceKey: sourceData.resourceKey || null,
+        referenceType: reference.type,
+        reference: reference.value,
+        status: 'unresolved',
+        targetName: null,
+        targetResourceKey: null,
+        targetUrl: null,
+        reason: null,
+      };
+
+      if (!targetEntry) {
+        diagnostic.reason = `No imported resource matched related resource ${reference.type}`;
+        summary.unresolved += 1;
+        items.push(diagnostic);
+        continue;
+      }
+
+      const targetResource = targetEntry.resource;
+      const targetUrl = targetResource?.url || targetEntry.externalUrl || null;
+      const dedupeKey = targetResource
+        ? `resource:${targetResource.id}`
+        : `url:${normalizeResourceUrlLookup(targetUrl)}`;
+
+      diagnostic.targetName =
+        targetEntry.resourceData?.name ||
+        targetResource?.name ||
+        targetEntry.externalName ||
+        targetUrl;
+      diagnostic.targetResourceKey = targetEntry.resourceData?.resourceKey || null;
+      diagnostic.targetUrl = targetUrl;
+
+      if (targetResource?.id === sourceResource.id) {
+        diagnostic.status = 'self_reference';
+        diagnostic.reason = 'Related resource matched the source resource';
+        summary.selfReferences += 1;
+        items.push(diagnostic);
+        continue;
+      }
+
+      if (seenTargets.has(dedupeKey)) {
+        diagnostic.status = 'duplicate_reference';
+        diagnostic.reason = 'Duplicate related-resource reference in this row';
+        summary.duplicateReferences += 1;
+        items.push(diagnostic);
+        continue;
+      }
+
+      seenTargets.add(dedupeKey);
+
+      if (targetResource) {
+        diagnostic.status = 'resolved_imported';
+        summary.resolvedImported += 1;
+      } else {
+        diagnostic.status = 'resolved_external_url';
+        summary.resolvedExternalUrl += 1;
+      }
+
+      items.push(diagnostic);
+    }
+  }
+
+  return {
+    items,
+    summary,
+  };
+};
+
+const getStrictRelatedLinkBlockers = (relatedLinkPreview) =>
+  (relatedLinkPreview?.items || []).filter((item) =>
+    ['unresolved', 'self_reference'].includes(item.status)
+  );
+
+const createImportValidationError = (message, details = {}) => {
+  const error = new Error(message);
+  error.statusCode = 400;
+  error.details = details;
+  return error;
+};
+
+const createRelatedResourceLinksForImport = async ({
+  tx,
+  lookup,
+  tenantId,
+  userId,
+  results,
+}) => {
+  for (const sourceEntry of lookup.records) {
+    const sourceResource = sourceEntry.resource;
+    const sourceData = sourceEntry.resourceData;
+    const references = getRelatedResourceReferences(sourceData);
+
+    if (references.length === 0) {
+      continue;
+    }
+
+    const createdTargets = new Set();
+
+    for (const reference of references) {
+      const targetEntry = resolveRelatedResourceReference(lookup, reference);
+
+      if (!targetEntry) {
+        results.relatedLinksSkipped.push({
+          source: sourceData.name,
+          reference: reference.value,
+          status: 'unresolved',
+          reason: `No imported resource matched related resource ${reference.type}`,
+        });
+        continue;
+      }
+
+      const targetResource = targetEntry.resource;
+      const targetUrl = targetResource
+        ? buildResourceUrl(targetResource.id)
+        : targetEntry.externalUrl;
+      const dedupeKey = targetResource
+        ? `resource:${targetResource.id}`
+        : `url:${normalizeResourceUrlLookup(targetUrl)}`;
+
+      if (!targetUrl) {
+        results.relatedLinksSkipped.push({
+          source: sourceData.name,
+          reference: reference.value,
+          status: 'missing_target_url',
+          reason: 'Related resource target did not have a URL',
+        });
+        continue;
+      }
+
+      if (createdTargets.has(dedupeKey)) {
+        results.relatedLinksSkipped.push({
+          source: sourceData.name,
+          reference: reference.value,
+          status: 'duplicate_reference',
+          reason: 'Duplicate related-resource reference in this row',
+        });
+        continue;
+      }
+
+      if (targetResource?.id === sourceResource.id) {
+        results.relatedLinksSkipped.push({
+          source: sourceData.name,
+          reference: reference.value,
+          status: 'self_reference',
+          reason: 'Related resource matched the source resource',
+        });
+        continue;
+      }
+
+      createdTargets.add(dedupeKey);
+
+      const [existingLink] = await tx
+        .select({ id: linkGroups.id })
+        .from(linkGroups)
+        .where(
+          and(
+            eq(linkGroups.linkingId, sourceResource.id),
+            eq(linkGroups.linkingType, 'resource'),
+            eq(linkGroups.url, targetUrl),
+            eq(linkGroups.tenantId, tenantId)
+          )
+        )
+        .limit(1);
+
+      if (existingLink) {
+        results.relatedLinksSkipped.push({
+          source: sourceData.name,
+          reference: reference.value,
+          status: 'duplicate',
+          reason: 'Related link already exists',
+        });
+        continue;
+      }
+
+      const [relatedLink] = await tx
+        .insert(linkGroups)
+        .values({
+          name:
+            targetEntry.resourceData?.name ||
+            targetResource?.name ||
+            targetEntry.externalName ||
+            targetUrl,
+          description: sourceData.relatedLinkDescription || null,
+          url: targetUrl,
+          category: sourceData.relatedLinkCategory || 'resource',
+          linkingId: sourceResource.id,
+          linkingType: 'resource',
+          visibility: sourceData.relatedLinkVisibility || 'private',
+          userId,
+          tenantId,
+        })
+        .returning();
+
+      results.relatedLinks.push(relatedLink);
+    }
+  }
+};
+
 /**
  * Execute the import with the transformed data
  */
-export const executeImportService = async (importData, userId, tenantId) => {
+export const executeImportService = async (
+  importData,
+  userId,
+  tenantId,
+  options = {}
+) => {
   try {
+    const relatedLinkPreview = buildRelatedResourceImportPreview(
+      importData.resources || []
+    );
+    const strictRelatedLinks = Boolean(options.strictRelatedLinks);
+    const strictBlockers = getStrictRelatedLinkBlockers(relatedLinkPreview);
+
+    if (strictRelatedLinks && strictBlockers.length > 0) {
+      throw createImportValidationError(
+        `Strict related-link validation failed for ${strictBlockers.length} reference${strictBlockers.length === 1 ? '' : 's'}`,
+        {
+          relatedLinkPreview,
+          strictBlockers,
+        }
+      );
+    }
+
     const results = {
       organizations: [],
       organizationsSkipped: [],
       resources: [],
       resourcesSkipped: [],
+      relatedLinks: [],
+      relatedLinksSkipped: [],
       tags: [],
       errors: [],
+      diagnostics: {
+        strictRelatedLinks,
+        relatedLinkPreview,
+      },
     };
 
     await db.transaction(async (tx) => {
@@ -392,6 +965,7 @@ export const executeImportService = async (importData, userId, tenantId) => {
       // Import resources - check for duplicates first
       console.log('Processing resources:', importData.resources.length);
       console.log('Organization map has', orgMap.size, 'organizations');
+      const importedResourceLookup = createImportedResourceLookup();
       
       for (const resourceData of importData.resources) {
         try {
@@ -410,6 +984,11 @@ export const executeImportService = async (importData, userId, tenantId) => {
               id: existingResource.id,
               reason: 'Already exists'
             });
+            registerImportedResource(
+              importedResourceLookup,
+              resourceData,
+              existingResource
+            );
             
             // Optionally update tags if they don't exist on the existing resource
             const tagIds = resourceData.tags
@@ -495,6 +1074,11 @@ export const executeImportService = async (importData, userId, tenantId) => {
             });
 
             results.resources.push(resource);
+            registerImportedResource(
+              importedResourceLookup,
+              resourceData,
+              resource
+            );
           }
         } catch (error) {
           console.error('Error processing resource:', error);
@@ -505,6 +1089,14 @@ export const executeImportService = async (importData, userId, tenantId) => {
           });
         }
       }
+
+      await createRelatedResourceLinksForImport({
+        tx,
+        lookup: importedResourceLookup,
+        tenantId,
+        userId,
+        results,
+      });
     });
 
     return {
@@ -515,13 +1107,25 @@ export const executeImportService = async (importData, userId, tenantId) => {
         organizationsSkipped: results.organizationsSkipped.length,
         resourcesCreated: results.resources.length,
         resourcesSkipped: results.resourcesSkipped.length,
+        relatedLinksCreated: results.relatedLinks.length,
+        relatedLinksSkipped: results.relatedLinksSkipped.length,
+        relatedLinksUnresolved: results.relatedLinksSkipped.filter(
+          (item) => item.status === 'unresolved'
+        ).length,
+        relatedLinksSelfReferences: results.relatedLinksSkipped.filter(
+          (item) => item.status === 'self_reference'
+        ).length,
         tagsCreated: results.tags.filter(tag => !tag.existing).length,
         tagsReused: results.tags.filter(tag => tag.existing).length,
         errors: results.errors.length,
+        strictRelatedLinks,
       }
     };
   } catch (error) {
     console.error('Error executing import:', error);
+    if (error.statusCode) {
+      throw error;
+    }
     throw new Error(`Failed to execute import: ${error.message}`);
   }
 };

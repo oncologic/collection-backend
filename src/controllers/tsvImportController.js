@@ -64,12 +64,12 @@ const ensureTenantImportAccess = async (req, res, tenantId) => {
  */
 export const previewImport = async (req, res) => {
   try {
-    const { tsvContent, tenantId } = req.body;
+    const { tsvContent, importRows, tenantId } = req.body;
 
-    if (!tsvContent) {
+    if (!tsvContent && !Array.isArray(importRows)) {
       return res.status(400).json({
         success: false,
-        message: 'TSV content is required',
+        message: 'Import rows or TSV content are required',
       });
     }
 
@@ -78,7 +78,10 @@ export const previewImport = async (req, res) => {
       return;
     }
 
-    const previewData = await previewImportService(tsvContent, tenantId);
+    const previewData = await previewImportService(
+      Array.isArray(importRows) ? importRows : tsvContent,
+      tenantId
+    );
     
     res.status(200).json({
       success: true,
@@ -100,7 +103,7 @@ export const previewImport = async (req, res) => {
  */
 export const executeImport = async (req, res) => {
   try {
-    const { importData, tenantId } = req.body;
+    const { importData, tenantId, strictRelatedLinks = false } = req.body;
     const userId = req.auth?.dbUserId;
 
     if (!importData) {
@@ -115,7 +118,9 @@ export const executeImport = async (req, res) => {
       return;
     }
 
-    const result = await executeImportService(importData, userId, tenantId);
+    const result = await executeImportService(importData, userId, tenantId, {
+      strictRelatedLinks,
+    });
 
     res.status(200).json({
       success: true,
@@ -124,9 +129,10 @@ export const executeImport = async (req, res) => {
     });
   } catch (error) {
     console.error('Error in executeImport:', error);
-    res.status(500).json({
+    res.status(error.statusCode || 500).json({
       success: false,
       message: error.message || 'Failed to execute import',
+      details: error.details || null,
     });
   }
 };

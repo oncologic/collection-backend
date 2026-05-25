@@ -36,7 +36,7 @@ export const subscriptionService = {
       plan: result[0].plan || {
         name: 'basic',
         displayName: 'Basic',
-        maxExternalCollections: 5,
+        maxExternalCollections: 20,
         maxRegularCollections: -1,
         canAddCollaborators: false,
         maxCollaboratorsPerCollection: 0,

@@ -225,6 +225,8 @@ export const collectionExternalLinkResourcesService = {
               imageMetadata: row.resources.imageMetadata,
               timestamps: row.resources.timestamps,
               fullText: row.resources.fullText,
+              durationValue: row.resources.durationValue,
+              durationUnit: row.resources.durationUnit,
               createdAt: row.resources.createdAt,
               updatedAt: row.resources.updatedAt,
               featured: row.resources.featured,

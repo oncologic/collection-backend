@@ -1107,6 +1107,8 @@ const WORKFLOW_SUGGESTION_STOP_WORDS = new Set([
   'long',
   'month',
   'months',
+  'year',
+  'years',
   'need',
   'new',
   'plan',
@@ -1586,6 +1588,8 @@ const normalizeCollectionPlanItem = (item = {}, promptTokens = new Set()) => {
       item.sourceCollectionId || item.source_collection_id || item.collectionId || null,
     startDate: item.startDate || item.start_date || item.date || null,
     endDate: item.endDate || item.end_date || item.startDate || item.start_date || item.date || null,
+    durationValue: item.durationValue || item.duration_value || null,
+    durationUnit: item.durationUnit || item.duration_unit || null,
     sortOrder: item.sortOrder || item.sort_order || null,
     tenantId: item.tenantId || item.tenant_id || null,
     similarity: similarity ? similarity.toFixed(3) : null,
@@ -3492,6 +3496,8 @@ export const generateChatWithAiAgents = async (
           description: item.description || item.notes || '',
           url: item.url || null,
           tenantId: item.tenant_id || null,
+          durationValue: item.durationValue || item.duration_value || null,
+          durationUnit: item.durationUnit || item.duration_unit || null,
           matchedTerms,
           selectionReason: buildRetrievedContentSelectionReason(
             item,
@@ -3932,6 +3938,8 @@ export const generateStructuredResourcesService = async (
 
     // Define the resource structure based on the resources model
     const resourceStructure = {
+      resourceKey:
+        'string - stable slug for this resource, unique within the response, such as intake_checklist',
       name: 'string - the title/name of the resource',
       description: 'string - detailed description of the resource',
       url: 'string - URL of the resource',
@@ -3941,6 +3949,22 @@ export const generateStructuredResourcesService = async (
       sensitivityLevelId: 'number - ID of the sensitivity level',
       expertiseLevelId: 'number - ID of the expertise level',
       tags: 'array of strings - tag IDs for categorization',
+      durationValue:
+        'number - optional estimated amount of time needed to complete or use this resource',
+      durationUnit:
+        'string - optional duration unit, one of minutes, hours, days, weeks, months, years',
+      relatedResourceKeys:
+        'array of strings - optional resourceKey values this resource should link to',
+      relatedResourceNames:
+        'array of strings - optional existing resource names this resource should link to',
+      relatedResourceUrls:
+        'array of strings - optional URLs this resource should link to',
+      relatedLinkCategory:
+        'string - optional related-link category, such as resource, website, article, video, document',
+      relatedLinkDescription:
+        'string - optional shared description for generated related links',
+      relatedLinkVisibility:
+        'string - optional visibility for generated related links, one of private, unlisted, public',
       imageKey: 'string - image key if applicable',
     };
 
@@ -3948,6 +3972,7 @@ export const generateStructuredResourcesService = async (
       answer: "I've created resource records based on your request...",
       data: [
         {
+          resourceKey: 'nccn_kidney_cancer_guidelines',
           name: 'NCCN Kidney Cancer Guidelines',
           resourceDate: '2024-01-01',
           resourceUpdatedDate: '2024-01-01',
@@ -3961,9 +3986,19 @@ export const generateStructuredResourcesService = async (
           sensitivityLevelId: 1,
           expertiseLevelId: 3,
           tags: ['tag-id-1', 'tag-id-2'],
+          durationValue: 2,
+          durationUnit: 'hours',
+          relatedResourceKeys: ['patient_education_video_understanding_kidney_cancer'],
+          relatedResourceNames: [],
+          relatedResourceUrls: [],
+          relatedLinkCategory: 'resource',
+          relatedLinkDescription:
+            'Use this patient education video after reviewing the guideline.',
+          relatedLinkVisibility: 'private',
           imageKey: '',
         },
         {
+          resourceKey: 'patient_education_video_understanding_kidney_cancer',
           name: 'Patient Education Video - Understanding Kidney Cancer',
           description:
             'Educational video from ACME Medical Center explaining kidney cancer basics for patients',
@@ -3973,6 +4008,14 @@ export const generateStructuredResourcesService = async (
           sensitivityLevelId: 1,
           expertiseLevelId: 1,
           tags: [],
+          durationValue: 20,
+          durationUnit: 'minutes',
+          relatedResourceKeys: [],
+          relatedResourceNames: [],
+          relatedResourceUrls: [],
+          relatedLinkCategory: 'resource',
+          relatedLinkDescription: '',
+          relatedLinkVisibility: 'private',
           imageKey: '',
         },
       ],
@@ -4021,7 +4064,19 @@ IMPORTANT RULES:
     - Look for partial name matches (e.g., "Cancer Institute" might match "National Cancer Institute")
     - If no match is found in the available organizations, leave organizations array empty
     - NEVER include organization names that aren't in the available list
-${effectiveOrgId ? `12. MANDATORY: Include organization ID ${effectiveOrgId} in the organizations array for ALL resources` : ''}
+12. DURATION RULES:
+    - If the resource represents a step, task, training, checklist, or workflow phase, estimate durationValue and durationUnit.
+    - durationUnit must be one of: minutes, hours, days, weeks, months, years.
+    - Omit durationValue and durationUnit only when no reasonable estimate can be inferred.
+13. RELATED RESOURCE RULES:
+    - Assign every resource a unique resourceKey using lowercase letters, numbers, and underscores.
+    - Use relatedResourceKeys to reference other resources in the same response by resourceKey.
+    - Use relatedResourceNames only for existing resources named by the user.
+    - Use relatedResourceUrls only for external URLs that are not represented by another resource in this response.
+    - Do not put a resource's own resourceKey in its relatedResourceKeys.
+    - relatedLinkVisibility should default to private.
+14. IMPORT CSV COMPATIBILITY: Use field names that match the import template exactly: resourceKey, durationValue, durationUnit, relatedResourceKeys, relatedResourceNames, relatedResourceUrls, relatedLinkCategory, relatedLinkDescription, relatedLinkVisibility.
+${effectiveOrgId ? `15. MANDATORY: Include organization ID ${effectiveOrgId} in the organizations array for ALL resources` : ''}
 
 RESPONSE FORMAT: Must be valid JSON with "answer" and "data" keys. Keep answer brief.`;
 
@@ -4071,7 +4126,17 @@ RESPONSE FORMAT: Must be valid JSON with "answer" and "data" keys. Keep answer b
         }
 
         // Clean string fields
-        ['name', 'description', 'url', 'imageKey'].forEach((field) => {
+        [
+          'resourceKey',
+          'name',
+          'description',
+          'url',
+          'durationUnit',
+          'relatedLinkCategory',
+          'relatedLinkDescription',
+          'relatedLinkVisibility',
+          'imageKey',
+        ].forEach((field) => {
           if (
             cleanedResource[field] &&
             typeof cleanedResource[field] === 'string'
@@ -4079,6 +4144,73 @@ RESPONSE FORMAT: Must be valid JSON with "answer" and "data" keys. Keep answer b
             cleanedResource[field] = cleanedResource[field].trim();
           }
         });
+
+        const durationHasValue =
+          cleanedResource.durationValue !== undefined &&
+          cleanedResource.durationValue !== null &&
+          cleanedResource.durationValue !== '';
+        const durationHasUnit =
+          cleanedResource.durationUnit !== undefined &&
+          cleanedResource.durationUnit !== null &&
+          cleanedResource.durationUnit !== '';
+
+        if (durationHasValue || durationHasUnit) {
+          const durationValue = Number(cleanedResource.durationValue);
+          const durationUnit = String(cleanedResource.durationUnit || '')
+            .trim()
+            .toLowerCase();
+          const allowedDurationUnits = new Set([
+            'minutes',
+            'hours',
+            'days',
+            'weeks',
+            'months',
+            'years',
+          ]);
+
+          if (
+            Number.isFinite(durationValue) &&
+            durationValue > 0 &&
+            allowedDurationUnits.has(durationUnit)
+          ) {
+            cleanedResource.durationValue = durationValue;
+            cleanedResource.durationUnit = durationUnit;
+          } else {
+            cleanedResource.durationValue = null;
+            cleanedResource.durationUnit = null;
+          }
+        } else {
+          cleanedResource.durationValue = null;
+          cleanedResource.durationUnit = null;
+        }
+
+        ['relatedResourceKeys', 'relatedResourceNames', 'relatedResourceUrls'].forEach(
+          (field) => {
+            const rawValue = cleanedResource[field];
+            const values = Array.isArray(rawValue)
+              ? rawValue
+              : String(rawValue || '')
+                  .split(/[;,]/)
+                  .map((item) => item.trim());
+
+            cleanedResource[field] = values
+              .map((item) => String(item || '').trim())
+              .filter(Boolean);
+          }
+        );
+
+        cleanedResource.relatedLinkCategory =
+          cleanedResource.relatedLinkCategory || 'resource';
+        cleanedResource.relatedLinkVisibility = String(
+          cleanedResource.relatedLinkVisibility || ''
+        ).toLowerCase();
+        cleanedResource.relatedLinkVisibility = [
+          'private',
+          'unlisted',
+          'public',
+        ].includes(cleanedResource.relatedLinkVisibility)
+          ? cleanedResource.relatedLinkVisibility
+          : 'private';
 
         // Ensure arrays and validate organizations
         cleanedResource.organizations = Array.isArray(

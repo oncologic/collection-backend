@@ -586,6 +586,7 @@ export const collectionController = {
           userId,
           tenantIds
         );
+        
         if (!canCreate.allowed) {
           return res.status(403).json({
             error: 'External collection limit reached',

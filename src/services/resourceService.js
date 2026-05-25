@@ -80,6 +80,8 @@ export const getResourcesWithRelations = (
       `,
       timestamps: resources.timestamps,
       fullText: resources.fullText,
+      durationValue: resources.durationValue,
+      durationUnit: resources.durationUnit,
     })
     .from(resources)
     .leftJoin(resourceTypes, eq(resources.typeId, resourceTypes.id))
@@ -155,6 +157,55 @@ const resolveTargetAudienceId = async ({ targetAudienceId, tenantId }) => {
   return defaultTargetAudience.id;
 };
 
+const ALLOWED_DURATION_UNITS = new Set([
+  'minutes',
+  'hours',
+  'days',
+  'weeks',
+  'months',
+  'years',
+]);
+
+const normalizeResourceDurationData = (data = {}) => {
+  const hasValue =
+    data.durationValue !== undefined &&
+    data.durationValue !== null &&
+    data.durationValue !== '';
+  const hasUnit =
+    data.durationUnit !== undefined &&
+    data.durationUnit !== null &&
+    data.durationUnit !== '';
+
+  if (!hasValue && !hasUnit) {
+    return {
+      durationValue: null,
+      durationUnit: null,
+    };
+  }
+
+  if (!hasValue || !hasUnit) {
+    throw new Error('Duration value and duration unit must be provided together');
+  }
+
+  const durationValue = Number(data.durationValue);
+  const durationUnit = String(data.durationUnit).trim().toLowerCase();
+
+  if (!Number.isFinite(durationValue) || durationValue <= 0) {
+    throw new Error('Duration value must be greater than 0');
+  }
+
+  if (!ALLOWED_DURATION_UNITS.has(durationUnit)) {
+    throw new Error(
+      'Duration unit must be one of minutes, hours, days, weeks, months, or years'
+    );
+  }
+
+  return {
+    durationValue,
+    durationUnit,
+  };
+};
+
 export async function createResourceService(data) {
   try {
     const normalizedTagIds = Array.isArray(data.tags)
@@ -174,6 +225,7 @@ export async function createResourceService(data) {
       targetAudienceId: data.targetAudienceId,
       tenantId: data.tenantId,
     });
+    const durationData = normalizeResourceDurationData(data);
 
     // Only include fields that match your database schema
     const cleanedData = {
@@ -198,6 +250,8 @@ export async function createResourceService(data) {
       listOrder: data.listOrder,
       timestamps: data.timestamps,
       fullText: data.fullText,
+      durationValue: durationData.durationValue,
+      durationUnit: durationData.durationUnit,
       tenantId: data.tenantId,
     };
 
@@ -343,6 +397,15 @@ export async function updateResourceService(
       logoUrl: _logoUrl,
       ...cleanData
     } = data;
+    const shouldUpdateDuration =
+      Object.prototype.hasOwnProperty.call(data, 'durationValue') ||
+      Object.prototype.hasOwnProperty.call(data, 'durationUnit');
+
+    if (shouldUpdateDuration) {
+      const durationData = normalizeResourceDurationData(data);
+      cleanData.durationValue = durationData.durationValue;
+      cleanData.durationUnit = durationData.durationUnit;
+    }
 
     // First get the current resource to get the addedByUserId
     const [currentResource] = await db
@@ -522,6 +585,8 @@ export const getAllResources = async (
       `,
       timestamps: resources.timestamps,
       fullText: resources.fullText,
+      durationValue: resources.durationValue,
+      durationUnit: resources.durationUnit,
     })
     .from(resources)
     .leftJoin(resourceTypes, eq(resources.typeId, resourceTypes.id))
@@ -764,6 +829,8 @@ export async function getResourcesByOrganizationIdService(
         `,
         timestamps: resources.timestamps,
         fullText: resources.fullText,
+        durationValue: resources.durationValue,
+        durationUnit: resources.durationUnit,
       })
       .from(resources)
       .leftJoin(resourceTypes, eq(resources.typeId, resourceTypes.id))
@@ -1099,6 +1166,8 @@ export const getBasicResourcesByIdsService = async (
         createdAt: resources.createdAt,
         updatedAt: resources.updatedAt,
         timestamps: resources.timestamps,
+        durationValue: resources.durationValue,
+        durationUnit: resources.durationUnit,
       })
       .from(resources)
       .innerJoin(resourceTypes, eq(resources.typeId, resourceTypes.id))
@@ -1400,6 +1469,8 @@ export async function getPendingResourcesService(tenantIds) {
         `,
         timestamps: resources.timestamps,
         fullText: resources.fullText,
+        durationValue: resources.durationValue,
+        durationUnit: resources.durationUnit,
       })
       .from(resources)
       .leftJoin(resourceTypes, eq(resources.typeId, resourceTypes.id))
