@@ -1750,6 +1750,35 @@ export async function getExternalLinksForCollectionByIdService(
                     )
                   )
                 ),
+                'resources', (
+                  SELECT COALESCE(
+                    jsonb_agg(
+                      jsonb_build_object(
+                        'id', celr.id,
+                        'resourceId', r.id,
+                        'notes', celr.notes,
+                        'orderPosition', celr.order_position,
+                        'createdAt', celr.created_at,
+                        'resource', jsonb_build_object(
+                          'id', r.id,
+                          'name', r.name,
+                          'description', r.description,
+                          'url', r.url,
+                          'resourceDate', r.resource_date,
+                          'durationValue', r.duration_value,
+                          'durationUnit', r.duration_unit,
+                          'createdAt', r.created_at,
+                          'updatedAt', r.updated_at
+                        )
+                      ) ORDER BY celr.order_position
+                    ),
+                    '[]'::jsonb
+                  )
+                  FROM collection_external_link_resources celr
+                  JOIN resources r ON celr.resource_id = r.id
+                  WHERE celr.collection_id = c.id
+                  AND celr.external_link_id = el.id
+                ),
                 'notations', (
                   SELECT COALESCE(
                     jsonb_agg(
@@ -1771,6 +1800,7 @@ export async function getExternalLinksForCollectionByIdService(
                         'startTime', celn.start_time,
                         'endTime', celn.end_time,
                         'timezone', celn.timezone,
+                        'type', celn.type,
                         'templateId', celn.template_id,
                         'customFields', celn.custom_fields,
                         'isTemplate', celn.is_template
